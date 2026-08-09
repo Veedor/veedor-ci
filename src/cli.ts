@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { buildScanOptions } from './index';
+import { buildScanOptions } from './index.js';
 
 const program = new Command();
 

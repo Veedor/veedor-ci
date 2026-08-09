@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Find the tests wasting your CI minutes — and see the bill they generate.",
   "license": "MIT",
-  "type": "commonjs",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -20,6 +20,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@octokit/rest": "^22.0.1",
     "commander": "^12.1.0"
   },
   "devDependencies": {

@@ -1,4 +1,4 @@
-import type { OutputFormat, RawScanOptions, ScanOptions } from './types';
+import type { OutputFormat, RawScanOptions, ScanOptions } from './types.js';
 
 export const OUTPUT_FORMATS: readonly OutputFormat[] = ['table', 'json', 'markdown'];
 

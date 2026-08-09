@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildScanOptions, isValidFormat, isValidRepo, parseLimit } from './index';
+import { buildScanOptions, isValidFormat, isValidRepo, parseLimit } from './index.js';
 
 describe('buildScanOptions', () => {
   it('builds a valid scan configuration', () => {
