@@ -5,6 +5,7 @@ export interface ScanOptions {
   workflow?: string;
   limit: number;
   format: OutputFormat;
+  priceOverrides?: Partial<PriceTableUsdPerMinute>;
 }
 
 export interface RawScanOptions {
@@ -12,6 +13,7 @@ export interface RawScanOptions {
   workflow?: string;
   limit: string;
   format: string;
+  pricePerMinute?: string;
 }
 
 export interface WorkflowRunSummary {
@@ -43,6 +45,8 @@ export interface JobSummary {
   startedAt: string | null;
   completedAt: string | null;
   durationMs: number | null;
+  runAttempt: number;
+  labels: string[];
   steps: JobStepSummary[];
 }
 
@@ -81,4 +85,37 @@ export interface CostReport {
   jobs: JobCost[];
   totalCostUsd: number;
   projection: MonthlyProjection;
+}
+
+export interface FlakyJobStat {
+  jobName: string;
+  runnerOs: RunnerOs;
+  flakyRuns: number;
+  sampleSize: number;
+  flakinessRate: number;
+  wastedMinutes: number;
+}
+
+export interface ReportJobRow {
+  jobName: string;
+  runnerOs: RunnerOs;
+  flakyRuns: number;
+  sampleSize: number;
+  flakinessRate: number;
+  wastedMinutes: number;
+  pricePerMinuteUsd: number;
+  costUsd: number;
+}
+
+export interface ScanReport {
+  repo: string;
+  workflow?: string;
+  generatedAt: string;
+  runsAnalyzed: number;
+  dateRange: { from: string; to: string };
+  jobs: ReportJobRow[];
+  totalWastedMinutes: number;
+  totalCostUsd: number;
+  analyzedDays: number;
+  projectedMonthlyCostUsd: number;
 }

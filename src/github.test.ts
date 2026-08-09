@@ -213,6 +213,8 @@ describe('listJobsForRun', () => {
             conclusion: 'success',
             started_at: '2026-08-01T00:00:00Z',
             completed_at: '2026-08-01T00:02:00Z',
+            run_attempt: 1,
+            labels: ['ubuntu-latest'],
             steps: [
               {
                 name: 'Checkout',
@@ -242,6 +244,8 @@ describe('listJobsForRun', () => {
         startedAt: '2026-08-01T00:00:00Z',
         completedAt: '2026-08-01T00:02:00Z',
         durationMs: 2 * 60 * 1000,
+        runAttempt: 1,
+        labels: ['ubuntu-latest'],
         steps: [
           {
             name: 'Checkout',
@@ -256,8 +260,19 @@ describe('listJobsForRun', () => {
       },
     ]);
     expect(listJobsForWorkflowRun).toHaveBeenCalledWith(
-      expect.objectContaining({ owner: 'octocat', repo: 'hello-world', run_id: 42 }),
+      expect.objectContaining({ owner: 'octocat', repo: 'hello-world', run_id: 42, filter: 'latest' }),
     );
+  });
+
+  it('requests all attempts when allAttempts is set', async () => {
+    const listJobsForWorkflowRun = vi.fn().mockResolvedValue({ data: { jobs: [] } });
+    const client: GitHubClient = {
+      rest: { actions: { listWorkflowRunsForRepo: vi.fn(), listWorkflowRuns: vi.fn(), listJobsForWorkflowRun } },
+    };
+
+    await listJobsForRun(client, { owner: 'octocat', repo: 'hello-world', runId: 42, allAttempts: true });
+
+    expect(listJobsForWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ filter: 'all' }));
   });
 
   it('leaves duration null for a step that has not completed', async () => {

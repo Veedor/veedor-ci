@@ -183,6 +183,8 @@ function toJobSummary(job: {
   conclusion: string | null;
   started_at: string;
   completed_at: string | null;
+  run_attempt?: number;
+  labels?: string[];
   steps?: Array<{
     name: string;
     number: number;
@@ -200,6 +202,8 @@ function toJobSummary(job: {
     startedAt: job.started_at ?? null,
     completedAt: job.completed_at,
     durationMs: durationBetween(job.started_at, job.completed_at),
+    runAttempt: job.run_attempt ?? 1,
+    labels: job.labels ?? [],
     steps: (job.steps ?? []).map(toJobStepSummary),
   };
 }
@@ -267,10 +271,12 @@ export interface ListJobsForRunParams {
   owner: string;
   repo: string;
   runId: number;
+  /** Include jobs from every attempt of the run, not just the latest. */
+  allAttempts?: boolean;
 }
 
 export async function listJobsForRun(client: GitHubClient, params: ListJobsForRunParams): Promise<JobSummary[]> {
-  const { owner, repo, runId } = params;
+  const { owner, repo, runId, allAttempts = false } = params;
   const repoSlug = `${owner}/${repo}`;
   const jobs: JobSummary[] = [];
 
@@ -282,6 +288,7 @@ export async function listJobsForRun(client: GitHubClient, params: ListJobsForRu
           owner,
           repo,
           run_id: runId,
+          filter: allAttempts ? 'all' : 'latest',
           per_page: PER_PAGE,
           page,
         }),
