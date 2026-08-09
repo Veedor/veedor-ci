@@ -45,3 +45,40 @@ export interface JobSummary {
   durationMs: number | null;
   steps: JobStepSummary[];
 }
+
+export type RunnerOs = 'linux' | 'windows' | 'macos' | 'self-hosted';
+
+export type PriceTableUsdPerMinute = Record<RunnerOs, number>;
+
+export interface WastedJobMinutes {
+  jobId: number;
+  jobName: string;
+  runnerOs: RunnerOs;
+  wastedMinutes: number;
+}
+
+export interface JobCost {
+  jobId: number;
+  jobName: string;
+  runnerOs: RunnerOs;
+  wastedMinutes: number;
+  pricePerMinuteUsd: number;
+  costUsd: number;
+}
+
+export interface DateRange {
+  from: Date;
+  to: Date;
+}
+
+export interface MonthlyProjection {
+  analyzedDays: number;
+  totalCostUsd: number;
+  projectedMonthlyCostUsd: number;
+}
+
+export interface CostReport {
+  jobs: JobCost[];
+  totalCostUsd: number;
+  projection: MonthlyProjection;
+}
