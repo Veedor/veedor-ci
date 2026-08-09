@@ -1,0 +1,32 @@
+name: 'Veedor CI'
+description: 'Find the tests wasting your CI minutes — and see the bill they generate.'
+author: 'Veedor'
+
+branding:
+  icon: 'dollar-sign'
+  color: 'green'
+
+inputs:
+  workflow:
+    description: 'Limit the scan to a single workflow (file name or ID). Defaults to scanning all workflows.'
+    required: false
+  limit:
+    description: 'Number of workflow runs to inspect.'
+    required: false
+    default: '200'
+  format:
+    description: 'Output format for the workflow log: table, json, or markdown.'
+    required: false
+    default: 'table'
+  comment-on-pr:
+    description: >-
+      If true and the run was triggered by a pull_request (or
+      pull_request_target) event, publish the markdown report as a PR
+      comment, editing the previous report comment instead of duplicating
+      it.
+    required: false
+    default: 'false'
+
+runs:
+  using: 'node20'
+  main: 'dist/action/index.cjs'

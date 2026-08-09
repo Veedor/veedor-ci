@@ -1,3 +1,8 @@
 node_modules/
-dist/
+# The Node action's bundle must be committed: GitHub Actions runs it
+# directly from the repo, with no npm install step. A parent directory
+# match (dist/) would keep git from descending into dist/action even
+# with a negation, so exclude dist's contents individually instead.
+dist/*
+!dist/action
 *.log

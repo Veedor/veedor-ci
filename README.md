@@ -28,13 +28,51 @@ they're burning.
 npx @veedor/ci scan --repo your-org/your-repo
 ```
 
-Or as a GitHub Action:
+## GitHub Action
+
+Veedor CI also ships as a Node 20 GitHub Action that scans the repository
+it runs in and, on pull requests, can post the report as a PR comment —
+editing its previous comment in place instead of piling up new ones.
 
 ```yaml
-- uses: veedor/veedor-ci@v1
-  with:
-    github-token: ${{ secrets.GITHUB_TOKEN }}
+# .github/workflows/veedor-ci.yml
+name: Veedor CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read       # required to read workflow run and job history
+  pull-requests: write # required only if comment-on-pr is true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: veedor/veedor-ci@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # workflow: ci.yml       # optional: limit the scan to one workflow
+          limit: 200
+          format: markdown
+          comment-on-pr: true
 ```
+
+### Inputs
+
+| Input           | Default   | Description                                                                                   |
+| ---------------- | --------- | ----------------------------------------------------------------------------------------------- |
+| `workflow`        | _(all)_   | Limit the scan to a single workflow (file name or ID).                                          |
+| `limit`           | `200`     | Number of workflow runs to inspect.                                                             |
+| `format`          | `table`   | Output format for the workflow log: `table`, `json`, or `markdown`.                             |
+| `comment-on-pr`   | `false`   | If `true` on a `pull_request`/`pull_request_target` event, publish the report as a PR comment.  |
+
+The action authenticates purely via the `GITHUB_TOKEN` environment
+variable — the same variable the CLI reads — so no separate token input
+is needed. The default `secrets.GITHUB_TOKEN` provided by the workflow is
+enough; no personal access token required.
 
 ## Free vs Pro
 
