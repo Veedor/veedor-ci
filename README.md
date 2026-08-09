@@ -28,6 +28,19 @@ they're burning.
 npx @veedor/ci scan --repo your-org/your-repo
 ```
 
+### Options
+
+| Flag                                | Default                       | Description                                                                                 |
+| ------------------------------------ | ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `--repo <owner/name>`                | _(required)_                   | GitHub repository to scan.                                                                   |
+| `--workflow <name>`                  | _(all workflows)_              | Limit the scan to a single workflow.                                                         |
+| `--limit <n>`                        | `200`                          | Number of workflow runs to inspect.                                                          |
+| `--format <table\|json\|markdown>`   | `table`                        | Output format.                                                                                |
+| `--price-per-minute <value>`         | _(GitHub's published rates)_    | Override runner USD/min pricing: a flat rate (`0.01`) or per-os pairs (`linux=0.01,windows=0.02`). |
+
+Auth is the `GITHUB_TOKEN` environment variable — there is no other way
+to authenticate, and no token is ever read from a file or flag.
+
 ## GitHub Action
 
 Veedor CI also ships as a Node 20 GitHub Action that scans the repository
@@ -50,7 +63,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: veedor/veedor-ci@v1
+      - uses: Veedor/veedor-ci@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -80,6 +93,11 @@ The scanner is and will remain **free and MIT-licensed**: scan any repo,
 get the full report. **Pro** (planned) adds what requires persistence:
 90-day history, trend tracking, automatic quarantine suggestions, and
 an org-wide dashboard.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, build/test/typecheck
+commands, and notes on the committed GitHub Action bundle.
 
 ## About Veedor
 

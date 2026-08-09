@@ -18,7 +18,8 @@
   "scripts": {
     "build": "tsc && npm run build:action",
     "build:action": "esbuild src/action-entry.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/action/index.cjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@actions/core": "^3.0.1",
