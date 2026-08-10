@@ -10,7 +10,10 @@
     "veedor-ci": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/action",
+    "!dist/action.*",
+    "!dist/action-entry.*"
   ],
   "engines": {
     "node": ">=20"

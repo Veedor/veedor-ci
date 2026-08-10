@@ -1,0 +1,10 @@
+# Build artifacts that only serve the GitHub Action (not the CLI/library
+# published to npm). The Action bundle is committed to git and consumed
+# directly by GitHub Actions, but it has no business in the npm tarball.
+dist/action/
+dist/action.js
+dist/action.js.map
+dist/action.d.ts
+dist/action-entry.js
+dist/action-entry.js.map
+dist/action-entry.d.ts
