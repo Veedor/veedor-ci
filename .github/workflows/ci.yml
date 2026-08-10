@@ -21,5 +21,13 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+
+      - name: Verify Action bundle is up to date
+        run: |
+          git diff --exit-code dist/action || {
+            echo "::error::El bundle del Action está desactualizado — corre npm run build y comitea dist/action antes de hacer push."
+            exit 1
+          }
+
       - run: npm test
       - run: npm run typecheck
