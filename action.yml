@@ -25,9 +25,10 @@ inputs:
     default: 'table'
   retry-window:
     description: >-
-      Time window in minutes for detecting "likely flaky" push-to-retry
-      patterns: a job fails on one commit and passes on the next commit
-      pushed to the same branch within this window.
+      Time window in minutes (max 240) for detecting "likely flaky"
+      push-to-retry patterns: a job fails on one commit and passes on the
+      next commit pushed to the same branch, by the same author, within
+      this window.
     required: false
     default: '60'
   comment-on-pr:

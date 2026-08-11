@@ -79,6 +79,7 @@ const REPORT_WITH_JOBS: ScanReport = {
   ],
   confirmed: { wastedMinutes: 89.5, costUsd: 2.08 },
   likely: { wastedMinutes: 43.1, costUsd: 0.11 },
+  excludedRunsMissingBranch: 3,
   totalWastedMinutes: 132.6,
   totalCostUsd: 2.19,
   analyzedDays: 30,
@@ -94,6 +95,7 @@ const EMPTY_REPORT: ScanReport = {
   jobs: [],
   confirmed: { wastedMinutes: 0, costUsd: 0 },
   likely: { wastedMinutes: 0, costUsd: 0 },
+  excludedRunsMissingBranch: 0,
   totalWastedMinutes: 0,
   totalCostUsd: 0,
   analyzedDays: 1,
@@ -123,6 +125,11 @@ describe('renderTable', () => {
     expect(output).toContain('Confirmed flaky total: 89.50 min — $2.08');
     expect(output).toContain('Likely flaky total: 43.10 min — $0.11');
     expect(output).toContain('Combined total wasted: 132.60 min — $2.19');
+  });
+
+  it('shows the count of runs excluded from likely detection for missing branch info', () => {
+    const output = renderTable(REPORT_WITH_JOBS);
+    expect(output).toContain('Runs excluded from "likely flaky" detection (no branch info): 3');
   });
 });
 
@@ -162,6 +169,11 @@ describe('renderMarkdown', () => {
     expect(output).toContain('### Confirmed flaky');
     expect(output).toContain('### Likely flaky');
     expect(output).toContain('**Combined: $2.19** (132.60 min) across both categories.');
+  });
+
+  it('shows the count of runs excluded from likely detection for missing branch info', () => {
+    const output = renderMarkdown(REPORT_WITH_JOBS);
+    expect(output).toMatch(/3 run\(s\) excluded from "likely flaky" detection/);
   });
 });
 

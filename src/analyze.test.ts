@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_RETRY_WINDOW_MINUTES, detectFlakyJobs, detectLikelyFlakyJobs, inferRunnerOs } from './analyze.js';
+import {
+  DEFAULT_RETRY_WINDOW_MINUTES,
+  detectFlakyJobs,
+  detectLikelyFlakyJobs,
+  inferRunnerOs,
+} from './analyze.js';
 import type { GitHubClient } from './github.js';
 import type { WorkflowRunSummary } from './types.js';
 
@@ -35,6 +40,7 @@ function makeRun(id: number, runAttempt: number): WorkflowRunSummary {
     name: 'CI',
     headSha: `sha-${id}`,
     headBranch: 'main',
+    authorId: 'dev@example.com',
     runAttempt,
     conclusion: runAttempt > 1 ? 'success' : 'failure',
     createdAt: '2026-08-01T00:00:00Z',
@@ -243,6 +249,7 @@ function makePushRun(overrides: {
   id: number;
   sha: string;
   branch?: string;
+  author?: string | null;
   conclusion: 'success' | 'failure';
   createdAt: string;
   runAttempt?: number;
@@ -252,6 +259,7 @@ function makePushRun(overrides: {
     name: 'CI',
     headSha: overrides.sha,
     headBranch: overrides.branch ?? 'main',
+    authorId: overrides.author === undefined ? 'dev@example.com' : overrides.author,
     runAttempt: overrides.runAttempt ?? 1,
     conclusion: overrides.conclusion,
     createdAt: overrides.createdAt,
@@ -296,14 +304,14 @@ describe('detectLikelyFlakyJobs', () => {
       }),
     });
 
-    const stats = await detectLikelyFlakyJobs(client, {
+    const result = await detectLikelyFlakyJobs(client, {
       owner: 'octocat',
       repo: 'hello-world',
       runs,
       retryWindowMinutes: DEFAULT_RETRY_WINDOW_MINUTES,
     });
 
-    expect(stats).toEqual([
+    expect(result.stats).toEqual([
       {
         jobName: 'unit-tests',
         runnerOs: 'linux',
@@ -313,6 +321,7 @@ describe('detectLikelyFlakyJobs', () => {
         wastedMinutes: 4,
       },
     ]);
+    expect(result.excludedRunsMissingBranch).toBe(0);
   });
 
   it('does not count a fail-then-pass pair when the pass falls outside the retry window', async () => {
@@ -337,14 +346,14 @@ describe('detectLikelyFlakyJobs', () => {
       }),
     });
 
-    const stats = await detectLikelyFlakyJobs(client, {
+    const result = await detectLikelyFlakyJobs(client, {
       owner: 'octocat',
       repo: 'hello-world',
       runs,
       retryWindowMinutes: 60,
     });
 
-    expect(stats).toEqual([
+    expect(result.stats).toEqual([
       { jobName: 'unit-tests', runnerOs: 'linux', flakyRuns: 0, sampleSize: 2, flakinessRate: 0, wastedMinutes: 0 },
     ]);
   });
@@ -370,17 +379,103 @@ describe('detectLikelyFlakyJobs', () => {
       3: makeJob({ name: 'unit-tests', run_attempt: 1, conclusion: 'success' }),
     });
 
-    const stats = await detectLikelyFlakyJobs(client, {
+    const result = await detectLikelyFlakyJobs(client, {
       owner: 'octocat',
       repo: 'hello-world',
       runs,
       retryWindowMinutes: 60,
     });
 
-    expect(stats).toHaveLength(1);
-    expect(stats[0]?.flakyRuns).toBe(1);
-    expect(stats[0]?.sampleSize).toBe(3);
-    expect(stats[0]?.wastedMinutes).toBe(4);
+    expect(result.stats).toHaveLength(1);
+    expect(result.stats[0]?.flakyRuns).toBe(1);
+    expect(result.stats[0]?.sampleSize).toBe(3);
+    expect(result.stats[0]?.wastedMinutes).toBe(4);
+  });
+
+  it('does not count a fail-then-pass pair when the commit authors differ', async () => {
+    // Same job, same branch, same moment, well within the window — but a
+    // different author's commit passing right after another author's
+    // failure is not evidence of a fix; it's coincidence on a busy branch.
+    const runs = [
+      makePushRun({
+        id: 1,
+        sha: 'sha-A',
+        author: 'alice@example.com',
+        conclusion: 'failure',
+        createdAt: '2026-08-01T00:00:00Z',
+      }),
+      makePushRun({
+        id: 2,
+        sha: 'sha-B',
+        author: 'bob@example.com',
+        conclusion: 'success',
+        createdAt: '2026-08-01T00:05:00Z',
+      }),
+    ];
+    const client = clientWithLatestJobByRun({
+      1: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'failure',
+        started_at: '2026-08-01T00:00:00Z',
+        completed_at: '2026-08-01T00:04:00Z',
+      }),
+      2: makeJob({ name: 'unit-tests', run_attempt: 1, conclusion: 'success' }),
+    });
+
+    const result = await detectLikelyFlakyJobs(client, {
+      owner: 'octocat',
+      repo: 'hello-world',
+      runs,
+      retryWindowMinutes: 60,
+    });
+
+    expect(result.stats).toEqual([
+      { jobName: 'unit-tests', runnerOs: 'linux', flakyRuns: 0, sampleSize: 2, flakinessRate: 0, wastedMinutes: 0 },
+    ]);
+  });
+
+  it('does not count a pair when either side has no known author', async () => {
+    const runs = [
+      makePushRun({ id: 1, sha: 'sha-A', author: null, conclusion: 'failure', createdAt: '2026-08-01T00:00:00Z' }),
+      makePushRun({ id: 2, sha: 'sha-B', conclusion: 'success', createdAt: '2026-08-01T00:05:00Z' }),
+    ];
+    const client = clientWithLatestJobByRun({
+      1: makeJob({ name: 'unit-tests', run_attempt: 1, conclusion: 'failure' }),
+      2: makeJob({ name: 'unit-tests', run_attempt: 1, conclusion: 'success' }),
+    });
+
+    const result = await detectLikelyFlakyJobs(client, {
+      owner: 'octocat',
+      repo: 'hello-world',
+      runs,
+      retryWindowMinutes: 60,
+    });
+
+    expect(result.stats[0]?.flakyRuns).toBe(0);
+  });
+
+  it('counts finished runs missing head_branch as excluded, not silently dropped', async () => {
+    const runs = [
+      makePushRun({ id: 1, sha: 'sha-A', branch: 'main', conclusion: 'failure', createdAt: '2026-08-01T00:00:00Z' }),
+      { ...makePushRun({ id: 2, sha: 'sha-B', conclusion: 'success', createdAt: '2026-08-01T00:05:00Z' }), headBranch: null },
+      { ...makePushRun({ id: 3, sha: 'sha-C', conclusion: 'failure', createdAt: '2026-08-01T00:10:00Z' }), headBranch: null },
+    ];
+    const client = clientWithLatestJobByRun({
+      1: makeJob({ name: 'unit-tests', run_attempt: 1, conclusion: 'failure' }),
+    });
+
+    const result = await detectLikelyFlakyJobs(client, {
+      owner: 'octocat',
+      repo: 'hello-world',
+      runs,
+      retryWindowMinutes: 60,
+    });
+
+    expect(result.excludedRunsMissingBranch).toBe(2);
+    const spy = client.rest.actions.listJobsForWorkflowRun as ReturnType<typeof vi.fn>;
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ run_id: 1 }));
   });
 
   it('mixes with detectFlakyJobs on the same job without double-counting: confirmed and likely stay separate', async () => {
@@ -470,11 +565,11 @@ describe('detectLikelyFlakyJobs', () => {
     expect(confirmed).toEqual([
       { jobName: 'e2e', runnerOs: 'linux', flakyRuns: 1, sampleSize: 1, flakinessRate: 1, wastedMinutes: 4 },
     ]);
-    expect(likely).toEqual([
+    expect(likely.stats).toEqual([
       { jobName: 'e2e', runnerOs: 'linux', flakyRuns: 1, sampleSize: 3, flakinessRate: 0.3333, wastedMinutes: 5 },
     ]);
     // The confirmed incident's wasted minutes (4) and the likely incident's (5)
     // are disjoint — neither run's wasted time is counted in both categories.
-    expect(confirmed[0]!.wastedMinutes + likely[0]!.wastedMinutes).toBe(9);
+    expect(confirmed[0]!.wastedMinutes + likely.stats[0]!.wastedMinutes).toBe(9);
   });
 });

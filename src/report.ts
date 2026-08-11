@@ -89,6 +89,9 @@ export function renderTable(report: ScanReport): string {
     )}, ${report.analyzedDays.toFixed(1)} days)`,
   );
   lines.push(`Retry window for "likely flaky": ${report.retryWindowMinutes} min`);
+  lines.push(
+    `Runs excluded from "likely flaky" detection (no branch info): ${report.excludedRunsMissingBranch}`,
+  );
   lines.push('');
 
   lines.push(...renderTableSection(CONFIRMED_LABEL, CONFIRMED_EVIDENCE, confirmedRows, report.confirmed));
@@ -162,6 +165,10 @@ export function renderMarkdown(report: ScanReport): string {
       `_Likely_ = a failure was followed by a pass on the *next* commit pushed to the same branch within ` +
       `${report.retryWindowMinutes} min (push-to-retry) — a strong signal, but not proof: the "fix" could also ` +
       `have been a real code change rather than a flake.`,
+  );
+  lines.push('');
+  lines.push(
+    `<sub>${report.excludedRunsMissingBranch} run(s) excluded from "likely flaky" detection: no branch info reported.</sub>`,
   );
   lines.push('');
 

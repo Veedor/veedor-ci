@@ -87,6 +87,7 @@ exports[`renderJson > matches the snapshot for a report with flaky jobs 1`] = `
     "wastedMinutes": 43.1,
     "costUsd": 0.11
   },
+  "excludedRunsMissingBranch": 3,
   "totalWastedMinutes": 132.6,
   "totalCostUsd": 2.19,
   "analyzedDays": 30,
@@ -113,6 +114,7 @@ exports[`renderJson > matches the snapshot for a report with no flaky jobs 1`] =
     "wastedMinutes": 0,
     "costUsd": 0
   },
+  "excludedRunsMissingBranch": 0,
   "totalWastedMinutes": 0,
   "totalCostUsd": 0,
   "analyzedDays": 1,
@@ -126,6 +128,8 @@ exports[`renderMarkdown > matches the snapshot for a report with flaky jobs, cap
 **Total wasted spend: $2.19** across 200 runs analyzed (2026-07-10 to 2026-08-09, ~30.0 days) — projected **$2.19/month** if this trend holds.
 
 > **Confidence levels:** _Confirmed_ = the same commit was retried and passed — hard evidence. _Likely_ = a failure was followed by a pass on the *next* commit pushed to the same branch within 60 min (push-to-retry) — a strong signal, but not proof: the "fix" could also have been a real code change rather than a flake.
+
+<sub>3 run(s) excluded from "likely flaky" detection: no branch info reported.</sub>
 
 ### Confirmed flaky
 
@@ -159,6 +163,8 @@ exports[`renderMarkdown > matches the snapshot for a report with no flaky jobs 1
 
 > **Confidence levels:** _Confirmed_ = the same commit was retried and passed — hard evidence. _Likely_ = a failure was followed by a pass on the *next* commit pushed to the same branch within 60 min (push-to-retry) — a strong signal, but not proof: the "fix" could also have been a real code change rather than a flake.
 
+<sub>0 run(s) excluded from "likely flaky" detection: no branch info reported.</sub>
+
 ### Confirmed flaky
 
 _Evidence: same commit, retried and passed._ Total: **$0.00** (0.00 min).
@@ -180,6 +186,7 @@ exports[`renderTable > matches the snapshot for a report with flaky jobs 1`] = `
 "Veedor CI report for octocat/hello-world (workflow: ci.yml)
 Runs analyzed: 200 (2026-07-10 to 2026-08-09, 30.0 days)
 Retry window for "likely flaky": 60 min
+Runs excluded from "likely flaky" detection (no branch info): 3
 
 Confirmed flaky (evidence: same commit, retried and passed)
 Job                  Runs  Flaky   Rate  Wasted min    USD
@@ -205,6 +212,7 @@ exports[`renderTable > matches the snapshot for a report with no flaky jobs 1`] 
 "Veedor CI report for octocat/quiet-repo
 Runs analyzed: 5 (2026-08-08 to 2026-08-09, 1.0 days)
 Retry window for "likely flaky": 60 min
+Runs excluded from "likely flaky" detection (no branch info): 0
 
 Confirmed flaky (evidence: same commit, retried and passed)
 Job  Runs  Flaky  Rate  Wasted min  USD

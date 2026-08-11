@@ -23,6 +23,8 @@ export interface WorkflowRunSummary {
   name: string;
   headSha: string;
   headBranch: string | null;
+  /** Commit author email, falling back to the triggering actor's login. */
+  authorId: string | null;
   runAttempt: number;
   conclusion: string | null;
   createdAt: string;
@@ -113,6 +115,17 @@ export interface FlakyJobStat {
   wastedMinutes: number;
 }
 
+export interface LikelyFlakyDetectionResult {
+  stats: FlakyJobStat[];
+  /**
+   * Finished runs (concrete success/failure conclusion) that were skipped
+   * because GitHub didn't report a head branch for them — likely detection
+   * can't group them, so they're invisible to it. Surfaced so the "likely"
+   * numbers read as a floor, not an exact count.
+   */
+  excludedRunsMissingBranch: number;
+}
+
 export interface ReportJobRow {
   jobName: string;
   runnerOs: RunnerOs;
@@ -140,6 +153,7 @@ export interface ScanReport {
   jobs: ReportJobRow[];
   confirmed: ConfidenceBreakdown;
   likely: ConfidenceBreakdown;
+  excludedRunsMissingBranch: number;
   totalWastedMinutes: number;
   totalCostUsd: number;
   analyzedDays: number;

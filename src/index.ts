@@ -1,4 +1,4 @@
-import { DEFAULT_RETRY_WINDOW_MINUTES, detectFlakyJobs, detectLikelyFlakyJobs } from './analyze.js';
+import { DEFAULT_RETRY_WINDOW_MINUTES, MAX_RETRY_WINDOW_MINUTES, detectFlakyJobs, detectLikelyFlakyJobs } from './analyze.js';
 import { buildCostReport, parsePricePerMinuteFlag } from './cost.js';
 import { createOctokitFromEnv, listWorkflowRuns, type GitHubClient } from './github.js';
 import type {
@@ -38,6 +38,9 @@ export function parseRetryWindowMinutes(value: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`Invalid --retry-window: "${value}". Must be a positive integer (minutes).`);
+  }
+  if (parsed > MAX_RETRY_WINDOW_MINUTES) {
+    throw new Error(`Invalid --retry-window: "${value}". Must not exceed ${MAX_RETRY_WINDOW_MINUTES} minutes.`);
   }
   return parsed;
 }
@@ -95,7 +98,7 @@ export async function runScan(options: ScanOptions, deps: RunScanDependencies = 
 
   const runs = await listWorkflowRuns(client, { owner, repo, limit: options.limit, workflow: options.workflow });
   const confirmedStats = await detectFlakyJobs(client, { owner, repo, runs });
-  const likelyStats = await detectLikelyFlakyJobs(client, {
+  const likelyResult = await detectLikelyFlakyJobs(client, {
     owner,
     repo,
     runs,
@@ -104,7 +107,7 @@ export async function runScan(options: ScanOptions, deps: RunScanDependencies = 
 
   const taggedStats: Array<{ stat: FlakyJobStat; confidence: FlakyConfidence }> = [
     ...confirmedStats.map((stat) => ({ stat, confidence: 'confirmed' as const })),
-    ...likelyStats.map((stat) => ({ stat, confidence: 'likely' as const })),
+    ...likelyResult.stats.map((stat) => ({ stat, confidence: 'likely' as const })),
   ];
 
   const wastedJobs: WastedJobMinutes[] = taggedStats.map(({ stat, confidence }, index) => ({
@@ -151,6 +154,7 @@ export async function runScan(options: ScanOptions, deps: RunScanDependencies = 
       wastedMinutes: sumWastedMinutes(jobs.filter((job) => job.confidence === 'likely')),
       costUsd: costReport.likelyCostUsd,
     },
+    excludedRunsMissingBranch: likelyResult.excludedRunsMissingBranch,
     totalWastedMinutes: sumWastedMinutes(jobs),
     totalCostUsd: costReport.totalCostUsd,
     analyzedDays: costReport.projection.analyzedDays,

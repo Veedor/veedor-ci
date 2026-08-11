@@ -1,5 +1,5 @@
 import { listJobsForRun, type GitHubClient } from './github.js';
-import type { FlakyJobStat, JobSummary, RunnerOs, WorkflowRunSummary } from './types.js';
+import type { FlakyJobStat, JobSummary, LikelyFlakyDetectionResult, RunnerOs, WorkflowRunSummary } from './types.js';
 
 /**
  * Infers the runner OS from a job's labels (e.g. ["ubuntu-latest"],
@@ -109,6 +109,7 @@ export async function detectFlakyJobs(client: GitHubClient, params: DetectFlakyJ
 }
 
 export const DEFAULT_RETRY_WINDOW_MINUTES = 60;
+export const MAX_RETRY_WINDOW_MINUTES = 240;
 
 interface JobTimelineEntry {
   workflowName: string;
@@ -116,6 +117,7 @@ interface JobTimelineEntry {
   jobName: string;
   runnerOs: RunnerOs;
   headSha: string;
+  authorId: string | null;
   conclusion: string | null;
   createdAt: string;
   durationMs: number | null;
@@ -134,11 +136,19 @@ export interface DetectLikelyFlakyJobsParams {
 
 /**
  * Detects "likely flaky" jobs via the push-to-retry pattern: a job fails on
- * one commit and the next commit pushed to the *same branch* passes, within
- * a configurable time window. This is invisible to detectFlakyJobs, which
- * only sees same-SHA re-runs (run_attempt > 1) — push-to-retry always
- * produces a new head SHA, since the developer pushed a new commit instead
- * of clicking "re-run".
+ * one commit and the next commit pushed to the *same branch, by the same
+ * author* passes, within a configurable time window. This is invisible to
+ * detectFlakyJobs, which only sees same-SHA re-runs (run_attempt > 1) —
+ * push-to-retry always produces a new head SHA, since the developer pushed
+ * a new commit instead of clicking "re-run".
+ *
+ * The author check (commit author email, falling back to the triggering
+ * actor's login — whichever the API gives us) is what makes this a causal
+ * signal rather than a coincidence: on a busy shared branch, someone else's
+ * unrelated commit can easily pass right after your commit failed, and
+ * without matching authors that would be misread as a fix. A pair with an
+ * unknown author on either side is not counted, erring toward fewer false
+ * positives.
  *
  * Confirmed incidents don't leak into this detector: a run that recovered
  * via a same-SHA re-run has a *final* job conclusion of "success" (we only
@@ -155,12 +165,12 @@ export interface DetectLikelyFlakyJobsParams {
 export async function detectLikelyFlakyJobs(
   client: GitHubClient,
   params: DetectLikelyFlakyJobsParams,
-): Promise<FlakyJobStat[]> {
+): Promise<LikelyFlakyDetectionResult> {
   const { owner, repo, runs, retryWindowMinutes } = params;
 
-  const finishedRuns = runs.filter(
-    (run) => (run.conclusion === 'success' || run.conclusion === 'failure') && Boolean(run.headBranch),
-  );
+  const runsWithConclusion = runs.filter((run) => run.conclusion === 'success' || run.conclusion === 'failure');
+  const finishedRuns = runsWithConclusion.filter((run) => Boolean(run.headBranch));
+  const excludedRunsMissingBranch = runsWithConclusion.length - finishedRuns.length;
 
   const entries: JobTimelineEntry[] = [];
   for (const run of finishedRuns) {
@@ -175,6 +185,7 @@ export async function detectLikelyFlakyJobs(
         jobName: job.name,
         runnerOs: inferRunnerOs(job.labels),
         headSha: run.headSha,
+        authorId: run.authorId,
         conclusion: job.conclusion,
         createdAt: run.createdAt,
         durationMs: job.durationMs,
@@ -213,6 +224,9 @@ export async function detectLikelyFlakyJobs(
       if (prev.conclusion !== 'failure' || curr.conclusion !== 'success' || prev.headSha === curr.headSha) {
         continue;
       }
+      if (prev.authorId === null || curr.authorId === null || prev.authorId !== curr.authorId) {
+        continue;
+      }
       const gapMs = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
       if (gapMs < 0 || gapMs > windowMs) {
         continue;
@@ -233,5 +247,5 @@ export async function detectLikelyFlakyJobs(
 
   stats.sort((a, b) => b.wastedMinutes - a.wastedMinutes || a.jobName.localeCompare(b.jobName));
 
-  return stats;
+  return { stats, excludedRunsMissingBranch };
 }

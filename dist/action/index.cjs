@@ -23391,6 +23391,7 @@ function toWorkflowRunSummary(run2) {
     name: run2.name ?? "",
     headSha: run2.head_sha,
     headBranch: run2.head_branch ?? null,
+    authorId: run2.head_commit?.author?.email ?? run2.actor?.login ?? null,
     runAttempt: run2.run_attempt ?? 1,
     conclusion: run2.conclusion,
     createdAt,
@@ -23571,14 +23572,15 @@ async function detectFlakyJobs(client, params) {
   return stats;
 }
 var DEFAULT_RETRY_WINDOW_MINUTES = 60;
+var MAX_RETRY_WINDOW_MINUTES = 240;
 function groupKey(entry) {
   return JSON.stringify([entry.workflowName, entry.jobName, entry.branch]);
 }
 async function detectLikelyFlakyJobs(client, params) {
   const { owner, repo, runs, retryWindowMinutes } = params;
-  const finishedRuns = runs.filter(
-    (run2) => (run2.conclusion === "success" || run2.conclusion === "failure") && Boolean(run2.headBranch)
-  );
+  const runsWithConclusion = runs.filter((run2) => run2.conclusion === "success" || run2.conclusion === "failure");
+  const finishedRuns = runsWithConclusion.filter((run2) => Boolean(run2.headBranch));
+  const excludedRunsMissingBranch = runsWithConclusion.length - finishedRuns.length;
   const entries = [];
   for (const run2 of finishedRuns) {
     const jobs = await listJobsForRun(client, { owner, repo, runId: run2.id });
@@ -23592,6 +23594,7 @@ async function detectLikelyFlakyJobs(client, params) {
         jobName: job.name,
         runnerOs: inferRunnerOs(job.labels),
         headSha: run2.headSha,
+        authorId: run2.authorId,
         conclusion: job.conclusion,
         createdAt: run2.createdAt,
         durationMs: job.durationMs
@@ -23625,6 +23628,9 @@ async function detectLikelyFlakyJobs(client, params) {
       if (prev.conclusion !== "failure" || curr.conclusion !== "success" || prev.headSha === curr.headSha) {
         continue;
       }
+      if (prev.authorId === null || curr.authorId === null || prev.authorId !== curr.authorId) {
+        continue;
+      }
       const gapMs = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
       if (gapMs < 0 || gapMs > windowMs) {
         continue;
@@ -23642,7 +23648,7 @@ async function detectLikelyFlakyJobs(client, params) {
     wastedMinutes: roundTo(acc.wastedMinutes, 2)
   }));
   stats.sort((a, b) => b.wastedMinutes - a.wastedMinutes || a.jobName.localeCompare(b.jobName));
-  return stats;
+  return { stats, excludedRunsMissingBranch };
 }
 
 // src/cost.ts
@@ -23779,6 +23785,9 @@ function parseRetryWindowMinutes(value) {
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`Invalid --retry-window: "${value}". Must be a positive integer (minutes).`);
   }
+  if (parsed > MAX_RETRY_WINDOW_MINUTES) {
+    throw new Error(`Invalid --retry-window: "${value}". Must not exceed ${MAX_RETRY_WINDOW_MINUTES} minutes.`);
+  }
   return parsed;
 }
 function buildScanOptions(raw) {
@@ -23823,7 +23832,7 @@ async function runScan(options, deps = {}) {
   const client = deps.client ?? createOctokitFromEnv();
   const runs = await listWorkflowRuns(client, { owner, repo, limit: options.limit, workflow: options.workflow });
   const confirmedStats = await detectFlakyJobs(client, { owner, repo, runs });
-  const likelyStats = await detectLikelyFlakyJobs(client, {
+  const likelyResult = await detectLikelyFlakyJobs(client, {
     owner,
     repo,
     runs,
@@ -23831,7 +23840,7 @@ async function runScan(options, deps = {}) {
   });
   const taggedStats = [
     ...confirmedStats.map((stat2) => ({ stat: stat2, confidence: "confirmed" })),
-    ...likelyStats.map((stat2) => ({ stat: stat2, confidence: "likely" }))
+    ...likelyResult.stats.map((stat2) => ({ stat: stat2, confidence: "likely" }))
   ];
   const wastedJobs = taggedStats.map(({ stat: stat2, confidence }, index) => ({
     jobId: index + 1,
@@ -23872,6 +23881,7 @@ async function runScan(options, deps = {}) {
       wastedMinutes: sumWastedMinutes(jobs.filter((job) => job.confidence === "likely")),
       costUsd: costReport.likelyCostUsd
     },
+    excludedRunsMissingBranch: likelyResult.excludedRunsMissingBranch,
     totalWastedMinutes: sumWastedMinutes(jobs),
     totalCostUsd: costReport.totalCostUsd,
     analyzedDays: costReport.projection.analyzedDays,
@@ -23949,6 +23959,9 @@ function renderTable(report) {
     )}, ${report.analyzedDays.toFixed(1)} days)`
   );
   lines.push(`Retry window for "likely flaky": ${report.retryWindowMinutes} min`);
+  lines.push(
+    `Runs excluded from "likely flaky" detection (no branch info): ${report.excludedRunsMissingBranch}`
+  );
   lines.push("");
   lines.push(...renderTableSection(CONFIRMED_LABEL, CONFIRMED_EVIDENCE, confirmedRows, report.confirmed));
   lines.push("");
@@ -24003,6 +24016,10 @@ function renderMarkdown(report) {
   lines.push("");
   lines.push(
     `> **Confidence levels:** _Confirmed_ = the same commit was retried and passed \u2014 hard evidence. _Likely_ = a failure was followed by a pass on the *next* commit pushed to the same branch within ${report.retryWindowMinutes} min (push-to-retry) \u2014 a strong signal, but not proof: the "fix" could also have been a real code change rather than a flake.`
+  );
+  lines.push("");
+  lines.push(
+    `<sub>${report.excludedRunsMissingBranch} run(s) excluded from "likely flaky" detection: no branch info reported.</sub>`
   );
   lines.push("");
   lines.push(...renderMarkdownSection(CONFIRMED_LABEL, CONFIRMED_EVIDENCE, confirmedRows, report.confirmed));

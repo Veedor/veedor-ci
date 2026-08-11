@@ -136,6 +136,8 @@ function toWorkflowRunSummary(run: {
   conclusion: string | null;
   created_at: string;
   updated_at: string;
+  head_commit?: { author?: { email?: string | null; name?: string | null } | null } | null;
+  actor?: { login?: string | null } | null;
 }): WorkflowRunSummary {
   const createdAt = run.created_at;
   const updatedAt = run.updated_at;
@@ -144,6 +146,7 @@ function toWorkflowRunSummary(run: {
     name: run.name ?? '',
     headSha: run.head_sha,
     headBranch: run.head_branch ?? null,
+    authorId: run.head_commit?.author?.email ?? run.actor?.login ?? null,
     runAttempt: run.run_attempt ?? 1,
     conclusion: run.conclusion,
     createdAt,

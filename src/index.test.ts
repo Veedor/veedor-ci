@@ -80,6 +80,22 @@ describe('buildScanOptions', () => {
       buildScanOptions({ repo: 'octocat/hello-world', limit: '200', format: 'table', retryWindow: '0' }),
     ).toThrow(/Invalid --retry-window/);
   });
+
+  it('accepts a --retry-window value at the maximum (240)', () => {
+    const config = buildScanOptions({
+      repo: 'octocat/hello-world',
+      limit: '200',
+      format: 'table',
+      retryWindow: '240',
+    });
+    expect(config.retryWindowMinutes).toBe(240);
+  });
+
+  it('rejects a --retry-window value above the maximum (240)', () => {
+    expect(() =>
+      buildScanOptions({ repo: 'octocat/hello-world', limit: '200', format: 'table', retryWindow: '241' }),
+    ).toThrow(/must not exceed 240/i);
+  });
 });
 
 describe('isValidRepo', () => {
@@ -202,6 +218,9 @@ describe('runScan', () => {
     expect(report.retryWindowMinutes).toBe(60);
     expect(report.confirmed).toEqual({ wastedMinutes: 3, costUsd: 0.024 });
     expect(report.likely).toEqual({ wastedMinutes: 0, costUsd: 0 });
+    // Both fixture runs are finished but have no head_branch, so they're
+    // excluded from likely detection and counted, not silently dropped.
+    expect(report.excludedRunsMissingBranch).toBe(2);
     expect(report.totalCostUsd).toBe(0.024);
     expect(report.projectedMonthlyCostUsd).toBe(0.18);
 
@@ -236,6 +255,7 @@ describe('runScan', () => {
             name: 'CI',
             head_sha: 'sha-A',
             head_branch: 'main',
+            head_commit: { author: { email: 'dev@example.com' } },
             run_attempt: 1,
             conclusion: 'failure',
             created_at: '2026-08-01T00:00:00Z',
@@ -246,6 +266,7 @@ describe('runScan', () => {
             name: 'CI',
             head_sha: 'sha-B',
             head_branch: 'main',
+            head_commit: { author: { email: 'dev@example.com' } },
             run_attempt: 1,
             conclusion: 'success',
             created_at: '2026-08-01T00:20:00Z',
@@ -315,7 +336,99 @@ describe('runScan', () => {
     ]);
     expect(report.confirmed).toEqual({ wastedMinutes: 0, costUsd: 0 });
     expect(report.likely).toEqual({ wastedMinutes: 4, costUsd: 0.032 });
+    expect(report.excludedRunsMissingBranch).toBe(0);
     expect(report.totalWastedMinutes).toBe(4);
     expect(report.totalCostUsd).toBe(0.032);
+  });
+
+  it('does not fold in a likely incident when the failing and passing commits have different authors', async () => {
+    const listWorkflowRunsForRepo = vi.fn().mockResolvedValue({
+      data: {
+        workflow_runs: [
+          {
+            id: 300,
+            name: 'CI',
+            head_sha: 'sha-A',
+            head_branch: 'main',
+            head_commit: { author: { email: 'alice@example.com' } },
+            run_attempt: 1,
+            conclusion: 'failure',
+            created_at: '2026-08-01T00:00:00Z',
+            updated_at: '2026-08-01T00:04:00Z',
+          },
+          {
+            id: 301,
+            name: 'CI',
+            head_sha: 'sha-B',
+            head_branch: 'main',
+            head_commit: { author: { email: 'bob@example.com' } },
+            run_attempt: 1,
+            conclusion: 'success',
+            created_at: '2026-08-01T00:20:00Z',
+            updated_at: '2026-08-01T00:22:00Z',
+          },
+        ],
+      },
+    });
+    const listJobsForWorkflowRun = vi.fn().mockImplementation(({ run_id }: { run_id: number }) => {
+      if (run_id === 300) {
+        return Promise.resolve({
+          data: {
+            jobs: [
+              {
+                id: 1,
+                name: 'push-retry-test',
+                status: 'completed',
+                conclusion: 'failure',
+                started_at: '2026-08-01T00:00:00Z',
+                completed_at: '2026-08-01T00:04:00Z',
+                run_attempt: 1,
+                labels: ['ubuntu-latest'],
+              },
+            ],
+          },
+        });
+      }
+      if (run_id === 301) {
+        return Promise.resolve({
+          data: {
+            jobs: [
+              {
+                id: 2,
+                name: 'push-retry-test',
+                status: 'completed',
+                conclusion: 'success',
+                started_at: '2026-08-01T00:20:00Z',
+                completed_at: '2026-08-01T00:22:00Z',
+                run_attempt: 1,
+                labels: ['ubuntu-latest'],
+              },
+            ],
+          },
+        });
+      }
+      return Promise.resolve({ data: { jobs: [] } });
+    });
+    const client: GitHubClient = {
+      rest: { actions: { listWorkflowRunsForRepo, listWorkflowRuns: vi.fn(), listJobsForWorkflowRun } },
+    };
+
+    const options = buildScanOptions({ repo: 'octocat/hello-world', limit: '10', format: 'table' });
+    const report = await runScan(options, { client });
+
+    expect(report.jobs).toEqual([
+      {
+        jobName: 'push-retry-test',
+        runnerOs: 'linux',
+        confidence: 'likely',
+        flakyRuns: 0,
+        sampleSize: 2,
+        flakinessRate: 0,
+        wastedMinutes: 0,
+        pricePerMinuteUsd: 0.008,
+        costUsd: 0,
+      },
+    ]);
+    expect(report.likely).toEqual({ wastedMinutes: 0, costUsd: 0 });
   });
 });

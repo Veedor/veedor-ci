@@ -23,7 +23,7 @@ program
   )
   .option(
     '--retry-window <minutes>',
-    'Time window (minutes) for detecting "likely flaky" push-to-retry patterns (fail on one commit, pass on the next)',
+    'Time window (minutes, max 240) for detecting "likely flaky" push-to-retry patterns (fail on one commit, pass on the next)',
     '60',
   )
   .action(

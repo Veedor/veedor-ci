@@ -35,13 +35,22 @@ single number without saying so:
   same run succeeded. This is hard evidence; nothing about the code
   changed between attempts.
 - **Likely flaky** — a job failed on one commit and a job of the same
-  name, on the same branch, passed on the *very next* commit pushed
-  within a configurable retry window (default 60 minutes). This is the
-  much more common "push-to-retry" pattern in real teams, but it's
-  inferred, not proven: the "fix" could have been a real code change
-  instead of a flake. A run that already recovered via a same-SHA retry
-  (confirmed) is never also counted as likely, so nothing is
-  double-counted between the two categories.
+  name, on the same branch, **by the same commit author**, passed on
+  the *very next* commit pushed within a configurable retry window
+  (default 60 minutes, max 240). Requiring the same author is what
+  turns this from a coincidence into a signal: on a busy shared branch,
+  someone else's unrelated commit can easily pass right after your
+  commit failed, and without matching authors that would be misread as
+  a fix. This is the much more common "push-to-retry" pattern in real
+  teams, but it's still inferred, not proven: the "fix" could have been
+  a real code change instead of a flake. A run that already recovered
+  via a same-SHA retry (confirmed) is never also counted as likely, so
+  nothing is double-counted between the two categories.
+
+Some finished runs don't report a branch (certain trigger types, mostly)
+and can't be grouped for likely detection — they're excluded, and the
+count of excluded runs is always shown in the report, so the "likely"
+numbers read as a floor, not an exact count.
 
 Every report — table, JSON, and markdown — breaks these out separately
 with their own totals, plus a combined total.
@@ -61,7 +70,7 @@ npx @veedor/ci scan --repo your-org/your-repo
 | `--limit <n>`                        | `200`                          | Number of workflow runs to inspect.                                                          |
 | `--format <table\|json\|markdown>`   | `table`                        | Output format.                                                                                |
 | `--price-per-minute <value>`         | _(GitHub's published rates)_    | Override runner USD/min pricing: a flat rate (`0.01`) or per-os pairs (`linux=0.01,windows=0.02`). |
-| `--retry-window <minutes>`           | `60`                            | Time window for detecting "likely flaky" push-to-retry patterns (fail on one commit, pass on the next). |
+| `--retry-window <minutes>`           | `60`                            | Time window (max `240`) for detecting "likely flaky" push-to-retry patterns (fail on one commit, pass on the next by the same author). |
 
 Auth is the `GITHUB_TOKEN` environment variable — there is no other way
 to authenticate, and no token is ever read from a file or flag.
@@ -106,7 +115,7 @@ jobs:
 | `workflow`        | _(all)_   | Limit the scan to a single workflow (file name or ID).                                          |
 | `limit`           | `200`     | Number of workflow runs to inspect.                                                             |
 | `format`          | `table`   | Output format for the workflow log: `table`, `json`, or `markdown`.                             |
-| `retry-window`    | `60`      | Time window in minutes for detecting "likely flaky" push-to-retry patterns. See [How flakiness is detected](#how-flakiness-is-detected). |
+| `retry-window`    | `60`      | Time window in minutes (max `240`) for detecting "likely flaky" push-to-retry patterns. See [How flakiness is detected](#how-flakiness-is-detected). |
 | `comment-on-pr`   | `false`   | If `true` on a `pull_request`/`pull_request_target` event, publish the report as a PR comment.  |
 
 The action resolves its token with the following precedence: the

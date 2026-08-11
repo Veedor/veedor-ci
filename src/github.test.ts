@@ -79,6 +79,7 @@ describe('listWorkflowRuns', () => {
         name: 'CI',
         headSha: 'sha-1',
         headBranch: null,
+        authorId: null,
         runAttempt: 1,
         conclusion: 'success',
         createdAt: '2026-08-01T00:00:00Z',
@@ -89,6 +90,42 @@ describe('listWorkflowRuns', () => {
     expect(listWorkflowRunsForRepo).toHaveBeenCalledWith(
       expect.objectContaining({ owner: 'octocat', repo: 'hello-world', per_page: 10, page: 1 }),
     );
+  });
+
+  it('prefers the commit author email over the triggering actor login', async () => {
+    const listWorkflowRunsForRepo = vi.fn().mockResolvedValue({
+      data: {
+        workflow_runs: [
+          {
+            ...createRunFixture(1),
+            head_commit: { author: { email: 'author@example.com', name: 'Author' } },
+            actor: { login: 'actor-login' },
+          },
+        ],
+      },
+    });
+    const client: GitHubClient = {
+      rest: { actions: { listWorkflowRunsForRepo, listWorkflowRuns: vi.fn(), listJobsForWorkflowRun: vi.fn() } },
+    };
+
+    const runs = await listWorkflowRuns(client, { owner: 'octocat', repo: 'hello-world', limit: 10 });
+
+    expect(runs[0]?.authorId).toBe('author@example.com');
+  });
+
+  it('falls back to the triggering actor login when there is no commit author email', async () => {
+    const listWorkflowRunsForRepo = vi.fn().mockResolvedValue({
+      data: {
+        workflow_runs: [{ ...createRunFixture(1), actor: { login: 'actor-login' } }],
+      },
+    });
+    const client: GitHubClient = {
+      rest: { actions: { listWorkflowRunsForRepo, listWorkflowRuns: vi.fn(), listJobsForWorkflowRun: vi.fn() } },
+    };
+
+    const runs = await listWorkflowRuns(client, { owner: 'octocat', repo: 'hello-world', limit: 10 });
+
+    expect(runs[0]?.authorId).toBe('actor-login');
   });
 
   it('uses the workflow-scoped endpoint when a workflow is given', async () => {
