@@ -78,6 +78,7 @@ describe('listWorkflowRuns', () => {
         id: 1,
         name: 'CI',
         headSha: 'sha-1',
+        headBranch: null,
         runAttempt: 1,
         conclusion: 'success',
         createdAt: '2026-08-01T00:00:00Z',

@@ -88,18 +88,42 @@ describe('parsePricePerMinuteFlag', () => {
 describe('computeJobCosts', () => {
   it('computes cost per job using the price table', () => {
     const jobs: WastedJobMinutes[] = [
-      { jobId: 1, jobName: 'test-linux', runnerOs: 'linux', wastedMinutes: 10 },
-      { jobId: 2, jobName: 'test-windows', runnerOs: 'windows', wastedMinutes: 5 },
-      { jobId: 3, jobName: 'test-macos', runnerOs: 'macos', wastedMinutes: 2 },
-      { jobId: 4, jobName: 'test-self-hosted', runnerOs: 'self-hosted', wastedMinutes: 100 },
+      { jobId: 1, jobName: 'test-linux', runnerOs: 'linux', wastedMinutes: 10, confidence: 'confirmed' },
+      { jobId: 2, jobName: 'test-windows', runnerOs: 'windows', wastedMinutes: 5, confidence: 'confirmed' },
+      { jobId: 3, jobName: 'test-macos', runnerOs: 'macos', wastedMinutes: 2, confidence: 'likely' },
+      { jobId: 4, jobName: 'test-self-hosted', runnerOs: 'self-hosted', wastedMinutes: 100, confidence: 'likely' },
     ];
 
     const costs = computeJobCosts(jobs, DEFAULT_PRICE_PER_MINUTE_USD);
 
     expect(costs).toEqual([
-      { jobId: 1, jobName: 'test-linux', runnerOs: 'linux', wastedMinutes: 10, pricePerMinuteUsd: 0.008, costUsd: 0.08 },
-      { jobId: 2, jobName: 'test-windows', runnerOs: 'windows', wastedMinutes: 5, pricePerMinuteUsd: 0.016, costUsd: 0.08 },
-      { jobId: 3, jobName: 'test-macos', runnerOs: 'macos', wastedMinutes: 2, pricePerMinuteUsd: 0.08, costUsd: 0.16 },
+      {
+        jobId: 1,
+        jobName: 'test-linux',
+        runnerOs: 'linux',
+        wastedMinutes: 10,
+        pricePerMinuteUsd: 0.008,
+        costUsd: 0.08,
+        confidence: 'confirmed',
+      },
+      {
+        jobId: 2,
+        jobName: 'test-windows',
+        runnerOs: 'windows',
+        wastedMinutes: 5,
+        pricePerMinuteUsd: 0.016,
+        costUsd: 0.08,
+        confidence: 'confirmed',
+      },
+      {
+        jobId: 3,
+        jobName: 'test-macos',
+        runnerOs: 'macos',
+        wastedMinutes: 2,
+        pricePerMinuteUsd: 0.08,
+        costUsd: 0.16,
+        confidence: 'likely',
+      },
       {
         jobId: 4,
         jobName: 'test-self-hosted',
@@ -107,12 +131,15 @@ describe('computeJobCosts', () => {
         wastedMinutes: 100,
         pricePerMinuteUsd: 0.002,
         costUsd: 0.2,
+        confidence: 'likely',
       },
     ]);
   });
 
   it('uses an overridden price table', () => {
-    const jobs: WastedJobMinutes[] = [{ jobId: 1, jobName: 'test', runnerOs: 'linux', wastedMinutes: 10 }];
+    const jobs: WastedJobMinutes[] = [
+      { jobId: 1, jobName: 'test', runnerOs: 'linux', wastedMinutes: 10, confidence: 'confirmed' },
+    ];
     const costs = computeJobCosts(jobs, resolvePriceTable({ linux: 0.5 }));
     expect(costs[0]?.costUsd).toBe(5);
   });
@@ -126,8 +153,8 @@ describe('sumCostUsd', () => {
   it('sums job costs', () => {
     const jobs = computeJobCosts(
       [
-        { jobId: 1, jobName: 'a', runnerOs: 'linux', wastedMinutes: 10 },
-        { jobId: 2, jobName: 'b', runnerOs: 'macos', wastedMinutes: 2 },
+        { jobId: 1, jobName: 'a', runnerOs: 'linux', wastedMinutes: 10, confidence: 'confirmed' },
+        { jobId: 2, jobName: 'b', runnerOs: 'macos', wastedMinutes: 2, confidence: 'likely' },
       ],
       DEFAULT_PRICE_PER_MINUTE_USD,
     );
@@ -180,8 +207,8 @@ describe('buildCostReport', () => {
     const from = new Date('2026-08-01T00:00:00Z');
     const to = new Date('2026-08-06T00:00:00Z');
     const wastedJobs: WastedJobMinutes[] = [
-      { jobId: 1, jobName: 'flaky-unit-tests', runnerOs: 'linux', wastedMinutes: 25 },
-      { jobId: 2, jobName: 'flaky-e2e', runnerOs: 'macos', wastedMinutes: 4 },
+      { jobId: 1, jobName: 'flaky-unit-tests', runnerOs: 'linux', wastedMinutes: 25, confidence: 'confirmed' },
+      { jobId: 2, jobName: 'flaky-e2e', runnerOs: 'macos', wastedMinutes: 4, confidence: 'likely' },
     ];
 
     const report = buildCostReport({ wastedJobs, dateRange: { from, to } });
@@ -196,7 +223,9 @@ describe('buildCostReport', () => {
   it('applies price overrides end to end', () => {
     const from = new Date('2026-08-01T00:00:00Z');
     const to = new Date('2026-08-02T00:00:00Z');
-    const wastedJobs: WastedJobMinutes[] = [{ jobId: 1, jobName: 'job', runnerOs: 'linux', wastedMinutes: 10 }];
+    const wastedJobs: WastedJobMinutes[] = [
+      { jobId: 1, jobName: 'job', runnerOs: 'linux', wastedMinutes: 10, confidence: 'confirmed' },
+    ];
 
     const report = buildCostReport({
       wastedJobs,
@@ -207,6 +236,35 @@ describe('buildCostReport', () => {
     expect(report.jobs[0]?.pricePerMinuteUsd).toBe(1);
     expect(report.jobs[0]?.costUsd).toBe(10);
     expect(report.totalCostUsd).toBe(10);
+  });
+
+  it('keeps confirmed and likely costs broken out separately, summing to the combined total', () => {
+    const from = new Date('2026-08-01T00:00:00Z');
+    const to = new Date('2026-08-02T00:00:00Z');
+    const wastedJobs: WastedJobMinutes[] = [
+      { jobId: 1, jobName: 'a', runnerOs: 'linux', wastedMinutes: 10, confidence: 'confirmed' },
+      { jobId: 2, jobName: 'b', runnerOs: 'linux', wastedMinutes: 5, confidence: 'confirmed' },
+      { jobId: 3, jobName: 'c', runnerOs: 'linux', wastedMinutes: 20, confidence: 'likely' },
+    ];
+
+    const report = buildCostReport({ wastedJobs, dateRange: { from, to } });
+
+    expect(report.confirmedCostUsd).toBe(0.12);
+    expect(report.likelyCostUsd).toBe(0.16);
+    expect(report.totalCostUsd).toBe(0.28);
+    expect(report.confirmedCostUsd + report.likelyCostUsd).toBe(report.totalCostUsd);
+  });
+
+  it('reports a zero breakdown for a category with no wasted jobs', () => {
+    const from = new Date('2026-08-01T00:00:00Z');
+    const to = new Date('2026-08-02T00:00:00Z');
+    const wastedJobs: WastedJobMinutes[] = [
+      { jobId: 1, jobName: 'a', runnerOs: 'linux', wastedMinutes: 10, confidence: 'confirmed' },
+    ];
+
+    const report = buildCostReport({ wastedJobs, dateRange: { from, to } });
+
+    expect(report.likelyCostUsd).toBe(0);
   });
 
   function roundedSum(jobs: { costUsd: number }[]): number {

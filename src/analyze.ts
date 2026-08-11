@@ -107,3 +107,131 @@ export async function detectFlakyJobs(client: GitHubClient, params: DetectFlakyJ
 
   return stats;
 }
+
+export const DEFAULT_RETRY_WINDOW_MINUTES = 60;
+
+interface JobTimelineEntry {
+  workflowName: string;
+  branch: string;
+  jobName: string;
+  runnerOs: RunnerOs;
+  headSha: string;
+  conclusion: string | null;
+  createdAt: string;
+  durationMs: number | null;
+}
+
+function groupKey(entry: Pick<JobTimelineEntry, 'workflowName' | 'jobName' | 'branch'>): string {
+  return JSON.stringify([entry.workflowName, entry.jobName, entry.branch]);
+}
+
+export interface DetectLikelyFlakyJobsParams {
+  owner: string;
+  repo: string;
+  runs: WorkflowRunSummary[];
+  retryWindowMinutes: number;
+}
+
+/**
+ * Detects "likely flaky" jobs via the push-to-retry pattern: a job fails on
+ * one commit and the next commit pushed to the *same branch* passes, within
+ * a configurable time window. This is invisible to detectFlakyJobs, which
+ * only sees same-SHA re-runs (run_attempt > 1) — push-to-retry always
+ * produces a new head SHA, since the developer pushed a new commit instead
+ * of clicking "re-run".
+ *
+ * Confirmed incidents don't leak into this detector: a run that recovered
+ * via a same-SHA re-run has a *final* job conclusion of "success" (we only
+ * look at each run's latest attempt), so it can never serve as the
+ * "failure" side of a likely pair — confirmed cases are structurally
+ * excluded, not filtered out after the fact.
+ *
+ * Only strictly adjacent entries in a job's per-branch timeline are
+ * compared, so a failure is never paired with a success that isn't the very
+ * next result for that job — this is what keeps the "no jumping over other
+ * runs in between" rule (and prevents one failure from being double-counted
+ * against two different later successes).
+ */
+export async function detectLikelyFlakyJobs(
+  client: GitHubClient,
+  params: DetectLikelyFlakyJobsParams,
+): Promise<FlakyJobStat[]> {
+  const { owner, repo, runs, retryWindowMinutes } = params;
+
+  const finishedRuns = runs.filter(
+    (run) => (run.conclusion === 'success' || run.conclusion === 'failure') && Boolean(run.headBranch),
+  );
+
+  const entries: JobTimelineEntry[] = [];
+  for (const run of finishedRuns) {
+    const jobs = await listJobsForRun(client, { owner, repo, runId: run.id });
+    for (const job of jobs) {
+      if (job.conclusion !== 'success' && job.conclusion !== 'failure') {
+        continue;
+      }
+      entries.push({
+        workflowName: run.name,
+        branch: run.headBranch as string,
+        jobName: job.name,
+        runnerOs: inferRunnerOs(job.labels),
+        headSha: run.headSha,
+        conclusion: job.conclusion,
+        createdAt: run.createdAt,
+        durationMs: job.durationMs,
+      });
+    }
+  }
+
+  const groups = new Map<string, JobTimelineEntry[]>();
+  for (const entry of entries) {
+    const key = groupKey(entry);
+    const group = groups.get(key);
+    if (group) {
+      group.push(entry);
+    } else {
+      groups.set(key, [entry]);
+    }
+  }
+
+  const windowMs = retryWindowMinutes * 60_000;
+  const accumulators = new Map<string, FlakyJobAccumulator>();
+
+  for (const group of groups.values()) {
+    group.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    const jobName = group[0]!.jobName;
+    let accumulator = accumulators.get(jobName);
+    if (!accumulator) {
+      accumulator = { runnerOs: group[0]!.runnerOs, flakyRuns: 0, sampleSize: 0, wastedMinutes: 0 };
+      accumulators.set(jobName, accumulator);
+    }
+    accumulator.sampleSize += group.length;
+
+    for (let i = 1; i < group.length; i += 1) {
+      const prev = group[i - 1]!;
+      const curr = group[i]!;
+      if (prev.conclusion !== 'failure' || curr.conclusion !== 'success' || prev.headSha === curr.headSha) {
+        continue;
+      }
+      const gapMs = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
+      if (gapMs < 0 || gapMs > windowMs) {
+        continue;
+      }
+      accumulator.flakyRuns += 1;
+      accumulator.wastedMinutes += (prev.durationMs ?? 0) / 60000;
+    }
+  }
+
+  const stats: FlakyJobStat[] = Array.from(accumulators.entries()).map(([jobName, acc]) => ({
+    jobName,
+    runnerOs: acc.runnerOs,
+    flakyRuns: acc.flakyRuns,
+    sampleSize: acc.sampleSize,
+    flakinessRate: acc.sampleSize > 0 ? roundTo(acc.flakyRuns / acc.sampleSize, 4) : 0,
+    wastedMinutes: roundTo(acc.wastedMinutes, 2),
+  }));
+
+  stats.sort((a, b) => b.wastedMinutes - a.wastedMinutes || a.jobName.localeCompare(b.jobName));
+
+  return stats;
+}

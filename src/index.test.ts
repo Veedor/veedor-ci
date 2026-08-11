@@ -15,6 +15,7 @@ describe('buildScanOptions', () => {
       workflow: undefined,
       limit: 200,
       format: 'table',
+      retryWindowMinutes: 60,
     });
   });
 
@@ -56,6 +57,28 @@ describe('buildScanOptions', () => {
     expect(() =>
       buildScanOptions({ repo: 'octocat/hello-world', limit: '200', format: 'table', pricePerMinute: 'nope' }),
     ).toThrow(/--price-per-minute/);
+  });
+
+  it('parses a --retry-window override when given', () => {
+    const config = buildScanOptions({
+      repo: 'octocat/hello-world',
+      limit: '200',
+      format: 'table',
+      retryWindow: '15',
+    });
+
+    expect(config.retryWindowMinutes).toBe(15);
+  });
+
+  it('defaults --retry-window to 60 minutes when not given', () => {
+    const config = buildScanOptions({ repo: 'octocat/hello-world', limit: '200', format: 'table' });
+    expect(config.retryWindowMinutes).toBe(60);
+  });
+
+  it('rejects a non-positive --retry-window value', () => {
+    expect(() =>
+      buildScanOptions({ repo: 'octocat/hello-world', limit: '200', format: 'table', retryWindow: '0' }),
+    ).toThrow(/Invalid --retry-window/);
   });
 });
 
@@ -167,6 +190,7 @@ describe('runScan', () => {
       {
         jobName: 'flaky-test',
         runnerOs: 'linux',
+        confidence: 'confirmed',
         flakyRuns: 1,
         sampleSize: 1,
         flakinessRate: 1,
@@ -175,9 +199,14 @@ describe('runScan', () => {
         costUsd: 0.024,
       },
     ]);
+    expect(report.retryWindowMinutes).toBe(60);
+    expect(report.confirmed).toEqual({ wastedMinutes: 3, costUsd: 0.024 });
+    expect(report.likely).toEqual({ wastedMinutes: 0, costUsd: 0 });
     expect(report.totalCostUsd).toBe(0.024);
     expect(report.projectedMonthlyCostUsd).toBe(0.18);
 
+    // The fixture runs have no head_branch, so likely detection (which
+    // requires a branch to group on) makes no extra API calls here.
     const spy = client.rest.actions.listJobsForWorkflowRun as ReturnType<typeof vi.fn>;
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ run_id: 101, filter: 'all' }));
@@ -196,5 +225,97 @@ describe('runScan', () => {
 
     expect(report.jobs[0]?.pricePerMinuteUsd).toBe(1);
     expect(report.jobs[0]?.costUsd).toBe(3);
+  });
+
+  it('folds in likely (push-to-retry) incidents alongside confirmed ones', async () => {
+    const listWorkflowRunsForRepo = vi.fn().mockResolvedValue({
+      data: {
+        workflow_runs: [
+          {
+            id: 200,
+            name: 'CI',
+            head_sha: 'sha-A',
+            head_branch: 'main',
+            run_attempt: 1,
+            conclusion: 'failure',
+            created_at: '2026-08-01T00:00:00Z',
+            updated_at: '2026-08-01T00:04:00Z',
+          },
+          {
+            id: 201,
+            name: 'CI',
+            head_sha: 'sha-B',
+            head_branch: 'main',
+            run_attempt: 1,
+            conclusion: 'success',
+            created_at: '2026-08-01T00:20:00Z',
+            updated_at: '2026-08-01T00:22:00Z',
+          },
+        ],
+      },
+    });
+    const listJobsForWorkflowRun = vi.fn().mockImplementation(({ run_id }: { run_id: number }) => {
+      if (run_id === 200) {
+        return Promise.resolve({
+          data: {
+            jobs: [
+              {
+                id: 1,
+                name: 'push-retry-test',
+                status: 'completed',
+                conclusion: 'failure',
+                started_at: '2026-08-01T00:00:00Z',
+                completed_at: '2026-08-01T00:04:00Z',
+                run_attempt: 1,
+                labels: ['ubuntu-latest'],
+              },
+            ],
+          },
+        });
+      }
+      if (run_id === 201) {
+        return Promise.resolve({
+          data: {
+            jobs: [
+              {
+                id: 2,
+                name: 'push-retry-test',
+                status: 'completed',
+                conclusion: 'success',
+                started_at: '2026-08-01T00:20:00Z',
+                completed_at: '2026-08-01T00:22:00Z',
+                run_attempt: 1,
+                labels: ['ubuntu-latest'],
+              },
+            ],
+          },
+        });
+      }
+      return Promise.resolve({ data: { jobs: [] } });
+    });
+    const client: GitHubClient = {
+      rest: { actions: { listWorkflowRunsForRepo, listWorkflowRuns: vi.fn(), listJobsForWorkflowRun } },
+    };
+
+    const options = buildScanOptions({ repo: 'octocat/hello-world', limit: '10', format: 'table' });
+    const report = await runScan(options, { client });
+
+    expect(report.jobs).toEqual([
+      {
+        jobName: 'push-retry-test',
+        runnerOs: 'linux',
+        confidence: 'likely',
+        flakyRuns: 1,
+        sampleSize: 2,
+        flakinessRate: 0.5,
+        wastedMinutes: 4,
+        pricePerMinuteUsd: 0.008,
+        costUsd: 0.032,
+      },
+    ]);
+    expect(report.confirmed).toEqual({ wastedMinutes: 0, costUsd: 0 });
+    expect(report.likely).toEqual({ wastedMinutes: 4, costUsd: 0.032 });
+    expect(report.totalWastedMinutes).toBe(4);
+    expect(report.totalCostUsd).toBe(0.032);
   });
 });

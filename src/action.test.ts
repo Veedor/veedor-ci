@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolvePullRequestNumber } from './action.js';
+import { resolveGitHubToken, resolvePullRequestNumber } from './action.js';
 
 describe('resolvePullRequestNumber', () => {
   it('extracts the PR number from a pull_request event payload', () => {
@@ -19,5 +19,19 @@ describe('resolvePullRequestNumber', () => {
     expect(resolvePullRequestNumber(null)).toBeUndefined();
     expect(resolvePullRequestNumber('not json')).toBeUndefined();
     expect(resolvePullRequestNumber(undefined)).toBeUndefined();
+  });
+});
+
+describe('resolveGitHubToken', () => {
+  it('uses the github-token input when it is set, even if GITHUB_TOKEN is also set', () => {
+    expect(resolveGitHubToken('input-token', 'env-token')).toBe('input-token');
+  });
+
+  it('falls back to the GITHUB_TOKEN env var when the input is absent', () => {
+    expect(resolveGitHubToken('', 'env-token')).toBe('env-token');
+  });
+
+  it('returns undefined when neither the input nor the env var is set', () => {
+    expect(resolveGitHubToken('', undefined)).toBeUndefined();
   });
 });

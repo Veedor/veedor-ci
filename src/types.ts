@@ -6,6 +6,7 @@ export interface ScanOptions {
   limit: number;
   format: OutputFormat;
   priceOverrides?: Partial<PriceTableUsdPerMinute>;
+  retryWindowMinutes: number;
 }
 
 export interface RawScanOptions {
@@ -14,12 +15,14 @@ export interface RawScanOptions {
   limit: string;
   format: string;
   pricePerMinute?: string;
+  retryWindow?: string;
 }
 
 export interface WorkflowRunSummary {
   id: number;
   name: string;
   headSha: string;
+  headBranch: string | null;
   runAttempt: number;
   conclusion: string | null;
   createdAt: string;
@@ -54,11 +57,22 @@ export type RunnerOs = 'linux' | 'windows' | 'macos' | 'self-hosted';
 
 export type PriceTableUsdPerMinute = Record<RunnerOs, number>;
 
+/**
+ * "confirmed": same run, same commit SHA, an earlier attempt failed and a
+ * later attempt (run_attempt > 1) succeeded — high-certainty evidence.
+ * "likely": a failure on one commit followed by a success on a *different*
+ * commit pushed to the same branch within the retry window — the
+ * push-to-retry pattern, which is common but inferred rather than proven
+ * (the fix could be a real code change instead of a flake).
+ */
+export type FlakyConfidence = 'confirmed' | 'likely';
+
 export interface WastedJobMinutes {
   jobId: number;
   jobName: string;
   runnerOs: RunnerOs;
   wastedMinutes: number;
+  confidence: FlakyConfidence;
 }
 
 export interface JobCost {
@@ -68,6 +82,7 @@ export interface JobCost {
   wastedMinutes: number;
   pricePerMinuteUsd: number;
   costUsd: number;
+  confidence: FlakyConfidence;
 }
 
 export interface DateRange {
@@ -84,6 +99,8 @@ export interface MonthlyProjection {
 export interface CostReport {
   jobs: JobCost[];
   totalCostUsd: number;
+  confirmedCostUsd: number;
+  likelyCostUsd: number;
   projection: MonthlyProjection;
 }
 
@@ -99,11 +116,17 @@ export interface FlakyJobStat {
 export interface ReportJobRow {
   jobName: string;
   runnerOs: RunnerOs;
+  confidence: FlakyConfidence;
   flakyRuns: number;
   sampleSize: number;
   flakinessRate: number;
   wastedMinutes: number;
   pricePerMinuteUsd: number;
+  costUsd: number;
+}
+
+export interface ConfidenceBreakdown {
+  wastedMinutes: number;
   costUsd: number;
 }
 
@@ -113,7 +136,10 @@ export interface ScanReport {
   generatedAt: string;
   runsAnalyzed: number;
   dateRange: { from: string; to: string };
+  retryWindowMinutes: number;
   jobs: ReportJobRow[];
+  confirmed: ConfidenceBreakdown;
+  likely: ConfidenceBreakdown;
   totalWastedMinutes: number;
   totalCostUsd: number;
   analyzedDays: number;

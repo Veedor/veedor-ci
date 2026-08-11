@@ -115,6 +115,7 @@ export function computeJobCosts(
       wastedMinutes: job.wastedMinutes,
       pricePerMinuteUsd,
       costUsd: roundUsd(job.wastedMinutes * pricePerMinuteUsd),
+      confidence: job.confidence,
     };
   });
 }
@@ -155,7 +156,9 @@ export function buildCostReport(params: BuildCostReportParams): CostReport {
   const priceTable = resolvePriceTable(params.priceOverrides);
   const jobs = computeJobCosts(params.wastedJobs, priceTable);
   const totalCostUsd = sumCostUsd(jobs);
+  const confirmedCostUsd = sumCostUsd(jobs.filter((job) => job.confidence === 'confirmed'));
+  const likelyCostUsd = sumCostUsd(jobs.filter((job) => job.confidence === 'likely'));
   const projection = projectMonthlyCost(totalCostUsd, params.dateRange, params.daysPerMonth);
 
-  return { jobs, totalCostUsd, projection };
+  return { jobs, totalCostUsd, confirmedCostUsd, likelyCostUsd, projection };
 }

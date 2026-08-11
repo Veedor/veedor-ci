@@ -131,6 +131,7 @@ function toWorkflowRunSummary(run: {
   id: number;
   name?: string | null;
   head_sha: string;
+  head_branch?: string | null;
   run_attempt?: number;
   conclusion: string | null;
   created_at: string;
@@ -142,6 +143,7 @@ function toWorkflowRunSummary(run: {
     id: run.id,
     name: run.name ?? '',
     headSha: run.head_sha,
+    headBranch: run.head_branch ?? null,
     runAttempt: run.run_attempt ?? 1,
     conclusion: run.conclusion,
     createdAt,

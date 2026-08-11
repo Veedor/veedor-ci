@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { detectFlakyJobs, inferRunnerOs } from './analyze.js';
+import { DEFAULT_RETRY_WINDOW_MINUTES, detectFlakyJobs, detectLikelyFlakyJobs, inferRunnerOs } from './analyze.js';
 import type { GitHubClient } from './github.js';
 import type { WorkflowRunSummary } from './types.js';
 
@@ -34,6 +34,7 @@ function makeRun(id: number, runAttempt: number): WorkflowRunSummary {
     id,
     name: 'CI',
     headSha: `sha-${id}`,
+    headBranch: 'main',
     runAttempt,
     conclusion: runAttempt > 1 ? 'success' : 'failure',
     createdAt: '2026-08-01T00:00:00Z',
@@ -235,5 +236,245 @@ describe('detectFlakyJobs', () => {
     expect(stats.map((s) => s.jobName)).toEqual(['linux-tests', 'windows-tests']);
     expect(stats[0]?.runnerOs).toBe('linux');
     expect(stats[1]?.runnerOs).toBe('windows');
+  });
+});
+
+function makePushRun(overrides: {
+  id: number;
+  sha: string;
+  branch?: string;
+  conclusion: 'success' | 'failure';
+  createdAt: string;
+  runAttempt?: number;
+}): WorkflowRunSummary {
+  return {
+    id: overrides.id,
+    name: 'CI',
+    headSha: overrides.sha,
+    headBranch: overrides.branch ?? 'main',
+    runAttempt: overrides.runAttempt ?? 1,
+    conclusion: overrides.conclusion,
+    createdAt: overrides.createdAt,
+    updatedAt: overrides.createdAt,
+    durationMs: 3 * 60 * 1000,
+  };
+}
+
+function clientWithLatestJobByRun(jobsByRunId: Record<number, RawJobFixture>): GitHubClient {
+  const listJobsForWorkflowRun = vi
+    .fn()
+    .mockImplementation(({ run_id, filter }: { run_id: number; filter: string }) => {
+      expect(filter).toBe('latest');
+      const job = jobsByRunId[run_id];
+      return Promise.resolve({ data: { jobs: job ? [job] : [] } });
+    });
+  return {
+    rest: { actions: { listWorkflowRunsForRepo: vi.fn(), listWorkflowRuns: vi.fn(), listJobsForWorkflowRun } },
+  };
+}
+
+describe('detectLikelyFlakyJobs', () => {
+  it('counts a clean push-to-retry pair: fail on one SHA, pass on the next, within the window', async () => {
+    const runs = [
+      makePushRun({ id: 1, sha: 'sha-A', conclusion: 'failure', createdAt: '2026-08-01T00:00:00Z' }),
+      makePushRun({ id: 2, sha: 'sha-B', conclusion: 'success', createdAt: '2026-08-01T00:30:00Z' }),
+    ];
+    const client = clientWithLatestJobByRun({
+      1: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'failure',
+        started_at: '2026-08-01T00:00:00Z',
+        completed_at: '2026-08-01T00:04:00Z',
+      }),
+      2: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'success',
+        started_at: '2026-08-01T00:30:00Z',
+        completed_at: '2026-08-01T00:32:00Z',
+      }),
+    });
+
+    const stats = await detectLikelyFlakyJobs(client, {
+      owner: 'octocat',
+      repo: 'hello-world',
+      runs,
+      retryWindowMinutes: DEFAULT_RETRY_WINDOW_MINUTES,
+    });
+
+    expect(stats).toEqual([
+      {
+        jobName: 'unit-tests',
+        runnerOs: 'linux',
+        flakyRuns: 1,
+        sampleSize: 2,
+        flakinessRate: 0.5,
+        wastedMinutes: 4,
+      },
+    ]);
+  });
+
+  it('does not count a fail-then-pass pair when the pass falls outside the retry window', async () => {
+    const runs = [
+      makePushRun({ id: 1, sha: 'sha-A', conclusion: 'failure', createdAt: '2026-08-01T00:00:00Z' }),
+      makePushRun({ id: 2, sha: 'sha-B', conclusion: 'success', createdAt: '2026-08-01T01:30:00Z' }),
+    ];
+    const client = clientWithLatestJobByRun({
+      1: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'failure',
+        started_at: '2026-08-01T00:00:00Z',
+        completed_at: '2026-08-01T00:04:00Z',
+      }),
+      2: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'success',
+        started_at: '2026-08-01T01:30:00Z',
+        completed_at: '2026-08-01T01:32:00Z',
+      }),
+    });
+
+    const stats = await detectLikelyFlakyJobs(client, {
+      owner: 'octocat',
+      repo: 'hello-world',
+      runs,
+      retryWindowMinutes: 60,
+    });
+
+    expect(stats).toEqual([
+      { jobName: 'unit-tests', runnerOs: 'linux', flakyRuns: 0, sampleSize: 2, flakinessRate: 0, wastedMinutes: 0 },
+    ]);
+  });
+
+  it('does not create a second incident when a later, non-adjacent success follows an already-resolved failure', async () => {
+    // fail(A) -> success(B) -> success(C): B correctly closes A (1 incident).
+    // C is just another later success and must not spawn a duplicate incident
+    // for A, nor pair with it by "jumping over" B.
+    const runs = [
+      makePushRun({ id: 1, sha: 'sha-A', conclusion: 'failure', createdAt: '2026-08-01T00:00:00Z' }),
+      makePushRun({ id: 2, sha: 'sha-B', conclusion: 'success', createdAt: '2026-08-01T00:10:00Z' }),
+      makePushRun({ id: 3, sha: 'sha-C', conclusion: 'success', createdAt: '2026-08-01T00:20:00Z' }),
+    ];
+    const client = clientWithLatestJobByRun({
+      1: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'failure',
+        started_at: '2026-08-01T00:00:00Z',
+        completed_at: '2026-08-01T00:04:00Z',
+      }),
+      2: makeJob({ name: 'unit-tests', run_attempt: 1, conclusion: 'success' }),
+      3: makeJob({ name: 'unit-tests', run_attempt: 1, conclusion: 'success' }),
+    });
+
+    const stats = await detectLikelyFlakyJobs(client, {
+      owner: 'octocat',
+      repo: 'hello-world',
+      runs,
+      retryWindowMinutes: 60,
+    });
+
+    expect(stats).toHaveLength(1);
+    expect(stats[0]?.flakyRuns).toBe(1);
+    expect(stats[0]?.sampleSize).toBe(3);
+    expect(stats[0]?.wastedMinutes).toBe(4);
+  });
+
+  it('mixes with detectFlakyJobs on the same job without double-counting: confirmed and likely stay separate', async () => {
+    // Run 1 (sha-A, run_attempt 2): recovered via a same-SHA re-run — confirmed.
+    // Run 2 (sha-B): fails and is never retried in place.
+    // Run 3 (sha-C): a different commit that passes within the window — likely fix for run 2.
+    const runs = [
+      makePushRun({ id: 1, sha: 'sha-A', conclusion: 'success', createdAt: '2026-08-01T00:00:00Z', runAttempt: 2 }),
+      makePushRun({ id: 2, sha: 'sha-B', conclusion: 'failure', createdAt: '2026-08-01T01:00:00Z' }),
+      makePushRun({ id: 3, sha: 'sha-C', conclusion: 'success', createdAt: '2026-08-01T01:30:00Z' }),
+    ];
+
+    const listJobsForWorkflowRun = vi
+      .fn()
+      .mockImplementation(({ run_id, filter }: { run_id: number; filter: string }) => {
+        if (run_id === 1 && filter === 'all') {
+          return Promise.resolve({
+            data: {
+              jobs: [
+                makeJob({
+                  name: 'e2e',
+                  run_attempt: 1,
+                  conclusion: 'failure',
+                  started_at: '2026-08-01T00:00:00Z',
+                  completed_at: '2026-08-01T00:04:00Z',
+                }),
+                makeJob({
+                  name: 'e2e',
+                  run_attempt: 2,
+                  conclusion: 'success',
+                  started_at: '2026-08-01T00:10:00Z',
+                  completed_at: '2026-08-01T00:12:00Z',
+                }),
+              ],
+            },
+          });
+        }
+        if (run_id === 1 && filter === 'latest') {
+          return Promise.resolve({
+            data: {
+              jobs: [
+                makeJob({
+                  name: 'e2e',
+                  run_attempt: 2,
+                  conclusion: 'success',
+                  started_at: '2026-08-01T00:10:00Z',
+                  completed_at: '2026-08-01T00:12:00Z',
+                }),
+              ],
+            },
+          });
+        }
+        if (run_id === 2) {
+          return Promise.resolve({
+            data: {
+              jobs: [
+                makeJob({
+                  name: 'e2e',
+                  run_attempt: 1,
+                  conclusion: 'failure',
+                  started_at: '2026-08-01T01:00:00Z',
+                  completed_at: '2026-08-01T01:05:00Z',
+                }),
+              ],
+            },
+          });
+        }
+        if (run_id === 3) {
+          return Promise.resolve({
+            data: { jobs: [makeJob({ name: 'e2e', run_attempt: 1, conclusion: 'success' })] },
+          });
+        }
+        return Promise.resolve({ data: { jobs: [] } });
+      });
+    const client: GitHubClient = {
+      rest: { actions: { listWorkflowRunsForRepo: vi.fn(), listWorkflowRuns: vi.fn(), listJobsForWorkflowRun } },
+    };
+
+    const confirmed = await detectFlakyJobs(client, { owner: 'octocat', repo: 'hello-world', runs });
+    const likely = await detectLikelyFlakyJobs(client, {
+      owner: 'octocat',
+      repo: 'hello-world',
+      runs,
+      retryWindowMinutes: 60,
+    });
+
+    expect(confirmed).toEqual([
+      { jobName: 'e2e', runnerOs: 'linux', flakyRuns: 1, sampleSize: 1, flakinessRate: 1, wastedMinutes: 4 },
+    ]);
+    expect(likely).toEqual([
+      { jobName: 'e2e', runnerOs: 'linux', flakyRuns: 1, sampleSize: 3, flakinessRate: 0.3333, wastedMinutes: 5 },
+    ]);
+    // The confirmed incident's wasted minutes (4) and the likely incident's (5)
+    // are disjoint — neither run's wasted time is counted in both categories.
+    expect(confirmed[0]!.wastedMinutes + likely[0]!.wastedMinutes).toBe(9);
   });
 });

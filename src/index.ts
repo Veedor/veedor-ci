@@ -1,8 +1,10 @@
-import { detectFlakyJobs } from './analyze.js';
+import { DEFAULT_RETRY_WINDOW_MINUTES, detectFlakyJobs, detectLikelyFlakyJobs } from './analyze.js';
 import { buildCostReport, parsePricePerMinuteFlag } from './cost.js';
 import { createOctokitFromEnv, listWorkflowRuns, type GitHubClient } from './github.js';
 import type {
   DateRange,
+  FlakyConfidence,
+  FlakyJobStat,
   OutputFormat,
   RawScanOptions,
   ReportJobRow,
@@ -32,6 +34,14 @@ export function parseLimit(value: string): number {
   return parsed;
 }
 
+export function parseRetryWindowMinutes(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid --retry-window: "${value}". Must be a positive integer (minutes).`);
+  }
+  return parsed;
+}
+
 export function buildScanOptions(raw: RawScanOptions): ScanOptions {
   if (!isValidRepo(raw.repo)) {
     throw new Error(`Invalid repo: "${raw.repo}". Expected format "owner/name".`);
@@ -46,6 +56,8 @@ export function buildScanOptions(raw: RawScanOptions): ScanOptions {
     limit: parseLimit(raw.limit),
     format: raw.format,
     priceOverrides: raw.pricePerMinute === undefined ? undefined : parsePricePerMinuteFlag(raw.pricePerMinute),
+    retryWindowMinutes:
+      raw.retryWindow === undefined ? DEFAULT_RETRY_WINDOW_MINUTES : parseRetryWindowMinutes(raw.retryWindow),
   };
 }
 
@@ -73,29 +85,46 @@ export interface RunScanDependencies {
   client?: GitHubClient;
 }
 
+function sumWastedMinutes(jobs: readonly ReportJobRow[]): number {
+  return Math.round(jobs.reduce((sum, job) => sum + job.wastedMinutes, 0) * 100) / 100;
+}
+
 export async function runScan(options: ScanOptions, deps: RunScanDependencies = {}): Promise<ScanReport> {
   const { owner, repo } = splitRepo(options.repo);
   const client = deps.client ?? createOctokitFromEnv();
 
   const runs = await listWorkflowRuns(client, { owner, repo, limit: options.limit, workflow: options.workflow });
-  const flakyStats = await detectFlakyJobs(client, { owner, repo, runs });
+  const confirmedStats = await detectFlakyJobs(client, { owner, repo, runs });
+  const likelyStats = await detectLikelyFlakyJobs(client, {
+    owner,
+    repo,
+    runs,
+    retryWindowMinutes: options.retryWindowMinutes,
+  });
 
-  const wastedJobs: WastedJobMinutes[] = flakyStats.map((stat, index) => ({
+  const taggedStats: Array<{ stat: FlakyJobStat; confidence: FlakyConfidence }> = [
+    ...confirmedStats.map((stat) => ({ stat, confidence: 'confirmed' as const })),
+    ...likelyStats.map((stat) => ({ stat, confidence: 'likely' as const })),
+  ];
+
+  const wastedJobs: WastedJobMinutes[] = taggedStats.map(({ stat, confidence }, index) => ({
     jobId: index + 1,
     jobName: stat.jobName,
     runnerOs: stat.runnerOs,
     wastedMinutes: stat.wastedMinutes,
+    confidence,
   }));
 
   const dateRange = computeDateRange(runs);
   const costReport = buildCostReport({ wastedJobs, dateRange, priceOverrides: options.priceOverrides });
 
-  const jobs: ReportJobRow[] = flakyStats
-    .map((stat, index) => {
+  const jobs: ReportJobRow[] = taggedStats
+    .map(({ stat, confidence }, index) => {
       const cost = costReport.jobs[index]!;
       return {
         jobName: stat.jobName,
         runnerOs: stat.runnerOs,
+        confidence,
         flakyRuns: stat.flakyRuns,
         sampleSize: stat.sampleSize,
         flakinessRate: stat.flakinessRate,
@@ -112,8 +141,17 @@ export async function runScan(options: ScanOptions, deps: RunScanDependencies = 
     generatedAt: new Date().toISOString(),
     runsAnalyzed: runs.length,
     dateRange: { from: dateRange.from.toISOString(), to: dateRange.to.toISOString() },
+    retryWindowMinutes: options.retryWindowMinutes,
     jobs,
-    totalWastedMinutes: Math.round(jobs.reduce((sum, job) => sum + job.wastedMinutes, 0) * 100) / 100,
+    confirmed: {
+      wastedMinutes: sumWastedMinutes(jobs.filter((job) => job.confidence === 'confirmed')),
+      costUsd: costReport.confirmedCostUsd,
+    },
+    likely: {
+      wastedMinutes: sumWastedMinutes(jobs.filter((job) => job.confidence === 'likely')),
+      costUsd: costReport.likelyCostUsd,
+    },
+    totalWastedMinutes: sumWastedMinutes(jobs),
     totalCostUsd: costReport.totalCostUsd,
     analyzedDays: costReport.projection.analyzedDays,
     projectedMonthlyCostUsd: costReport.projection.projectedMonthlyCostUsd,

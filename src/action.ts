@@ -23,6 +23,11 @@ function splitRepo(repo: string): { owner: string; repo: string } {
   return { owner, repo: name };
 }
 
+/** Precedence: the `github-token` input, if set, wins over the `GITHUB_TOKEN` env var. */
+export function resolveGitHubToken(inputToken: string, envToken: string | undefined): string | undefined {
+  return inputToken || envToken || undefined;
+}
+
 export async function run(): Promise<void> {
   const repo = process.env.GITHUB_REPOSITORY;
   if (!repo) {
@@ -34,9 +39,11 @@ export async function run(): Promise<void> {
     workflow: core.getInput('workflow') || undefined,
     limit: core.getInput('limit') || '200',
     format: core.getInput('format') || 'table',
+    retryWindow: core.getInput('retry-window') || undefined,
   });
 
-  const client = createOctokitFromEnv();
+  const token = resolveGitHubToken(core.getInput('github-token'), process.env.GITHUB_TOKEN);
+  const client = createOctokitFromEnv({ token });
   const report = await runScan(options, { client });
   core.info(renderReport(report, options.format));
 

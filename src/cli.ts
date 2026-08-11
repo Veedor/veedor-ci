@@ -21,6 +21,11 @@ program
     '--price-per-minute <value>',
     'Override runner USD/min pricing: a flat rate ("0.01") or per-os pairs ("linux=0.01,windows=0.02")',
   )
+  .option(
+    '--retry-window <minutes>',
+    'Time window (minutes) for detecting "likely flaky" push-to-retry patterns (fail on one commit, pass on the next)',
+    '60',
+  )
   .action(
     async (rawOptions: {
       repo: string;
@@ -28,6 +33,7 @@ program
       limit: string;
       format: string;
       pricePerMinute?: string;
+      retryWindow?: string;
     }) => {
       try {
         const options = buildScanOptions(rawOptions);

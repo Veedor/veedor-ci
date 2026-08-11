@@ -7,6 +7,11 @@ branding:
   color: 'green'
 
 inputs:
+  github-token:
+    description: >-
+      GitHub token used to authenticate API requests. Defaults to the
+      GITHUB_TOKEN environment variable if not set.
+    required: false
   workflow:
     description: 'Limit the scan to a single workflow (file name or ID). Defaults to scanning all workflows.'
     required: false
@@ -18,6 +23,13 @@ inputs:
     description: 'Output format for the workflow log: table, json, or markdown.'
     required: false
     default: 'table'
+  retry-window:
+    description: >-
+      Time window in minutes for detecting "likely flaky" push-to-retry
+      patterns: a job fails on one commit and passes on the next commit
+      pushed to the same branch within this window.
+    required: false
+    default: '60'
   comment-on-pr:
     description: >-
       If true and the run was triggered by a pull_request (or
@@ -28,5 +40,5 @@ inputs:
     default: 'false'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/action/index.cjs'

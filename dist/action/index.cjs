@@ -23390,6 +23390,7 @@ function toWorkflowRunSummary(run2) {
     id: run2.id,
     name: run2.name ?? "",
     headSha: run2.head_sha,
+    headBranch: run2.head_branch ?? null,
     runAttempt: run2.run_attempt ?? 1,
     conclusion: run2.conclusion,
     createdAt,
@@ -23569,6 +23570,80 @@ async function detectFlakyJobs(client, params) {
   stats.sort((a, b) => b.wastedMinutes - a.wastedMinutes || a.jobName.localeCompare(b.jobName));
   return stats;
 }
+var DEFAULT_RETRY_WINDOW_MINUTES = 60;
+function groupKey(entry) {
+  return JSON.stringify([entry.workflowName, entry.jobName, entry.branch]);
+}
+async function detectLikelyFlakyJobs(client, params) {
+  const { owner, repo, runs, retryWindowMinutes } = params;
+  const finishedRuns = runs.filter(
+    (run2) => (run2.conclusion === "success" || run2.conclusion === "failure") && Boolean(run2.headBranch)
+  );
+  const entries = [];
+  for (const run2 of finishedRuns) {
+    const jobs = await listJobsForRun(client, { owner, repo, runId: run2.id });
+    for (const job of jobs) {
+      if (job.conclusion !== "success" && job.conclusion !== "failure") {
+        continue;
+      }
+      entries.push({
+        workflowName: run2.name,
+        branch: run2.headBranch,
+        jobName: job.name,
+        runnerOs: inferRunnerOs(job.labels),
+        headSha: run2.headSha,
+        conclusion: job.conclusion,
+        createdAt: run2.createdAt,
+        durationMs: job.durationMs
+      });
+    }
+  }
+  const groups = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    const key = groupKey(entry);
+    const group = groups.get(key);
+    if (group) {
+      group.push(entry);
+    } else {
+      groups.set(key, [entry]);
+    }
+  }
+  const windowMs = retryWindowMinutes * 6e4;
+  const accumulators = /* @__PURE__ */ new Map();
+  for (const group of groups.values()) {
+    group.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const jobName = group[0].jobName;
+    let accumulator = accumulators.get(jobName);
+    if (!accumulator) {
+      accumulator = { runnerOs: group[0].runnerOs, flakyRuns: 0, sampleSize: 0, wastedMinutes: 0 };
+      accumulators.set(jobName, accumulator);
+    }
+    accumulator.sampleSize += group.length;
+    for (let i = 1; i < group.length; i += 1) {
+      const prev = group[i - 1];
+      const curr = group[i];
+      if (prev.conclusion !== "failure" || curr.conclusion !== "success" || prev.headSha === curr.headSha) {
+        continue;
+      }
+      const gapMs = new Date(curr.createdAt).getTime() - new Date(prev.createdAt).getTime();
+      if (gapMs < 0 || gapMs > windowMs) {
+        continue;
+      }
+      accumulator.flakyRuns += 1;
+      accumulator.wastedMinutes += (prev.durationMs ?? 0) / 6e4;
+    }
+  }
+  const stats = Array.from(accumulators.entries()).map(([jobName, acc]) => ({
+    jobName,
+    runnerOs: acc.runnerOs,
+    flakyRuns: acc.flakyRuns,
+    sampleSize: acc.sampleSize,
+    flakinessRate: acc.sampleSize > 0 ? roundTo(acc.flakyRuns / acc.sampleSize, 4) : 0,
+    wastedMinutes: roundTo(acc.wastedMinutes, 2)
+  }));
+  stats.sort((a, b) => b.wastedMinutes - a.wastedMinutes || a.jobName.localeCompare(b.jobName));
+  return stats;
+}
 
 // src/cost.ts
 var RUNNER_OS_VALUES = ["linux", "windows", "macos", "self-hosted"];
@@ -23652,7 +23727,8 @@ function computeJobCosts(wastedJobs, priceTable) {
       runnerOs: job.runnerOs,
       wastedMinutes: job.wastedMinutes,
       pricePerMinuteUsd,
-      costUsd: roundUsd(job.wastedMinutes * pricePerMinuteUsd)
+      costUsd: roundUsd(job.wastedMinutes * pricePerMinuteUsd),
+      confidence: job.confidence
     };
   });
 }
@@ -23676,8 +23752,10 @@ function buildCostReport(params) {
   const priceTable = resolvePriceTable(params.priceOverrides);
   const jobs = computeJobCosts(params.wastedJobs, priceTable);
   const totalCostUsd = sumCostUsd(jobs);
+  const confirmedCostUsd = sumCostUsd(jobs.filter((job) => job.confidence === "confirmed"));
+  const likelyCostUsd = sumCostUsd(jobs.filter((job) => job.confidence === "likely"));
   const projection = projectMonthlyCost(totalCostUsd, params.dateRange, params.daysPerMonth);
-  return { jobs, totalCostUsd, projection };
+  return { jobs, totalCostUsd, confirmedCostUsd, likelyCostUsd, projection };
 }
 
 // src/index.ts
@@ -23696,6 +23774,13 @@ function parseLimit(value) {
   }
   return parsed;
 }
+function parseRetryWindowMinutes(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid --retry-window: "${value}". Must be a positive integer (minutes).`);
+  }
+  return parsed;
+}
 function buildScanOptions(raw) {
   if (!isValidRepo(raw.repo)) {
     throw new Error(`Invalid repo: "${raw.repo}". Expected format "owner/name".`);
@@ -23708,7 +23793,8 @@ function buildScanOptions(raw) {
     workflow: raw.workflow,
     limit: parseLimit(raw.limit),
     format: raw.format,
-    priceOverrides: raw.pricePerMinute === void 0 ? void 0 : parsePricePerMinuteFlag(raw.pricePerMinute)
+    priceOverrides: raw.pricePerMinute === void 0 ? void 0 : parsePricePerMinuteFlag(raw.pricePerMinute),
+    retryWindowMinutes: raw.retryWindow === void 0 ? DEFAULT_RETRY_WINDOW_MINUTES : parseRetryWindowMinutes(raw.retryWindow)
   };
 }
 function splitRepo(repo) {
@@ -23729,24 +23815,39 @@ function computeDateRange(runs) {
     to: new Date(Math.max(...createdTimes))
   };
 }
+function sumWastedMinutes(jobs) {
+  return Math.round(jobs.reduce((sum, job) => sum + job.wastedMinutes, 0) * 100) / 100;
+}
 async function runScan(options, deps = {}) {
   const { owner, repo } = splitRepo(options.repo);
   const client = deps.client ?? createOctokitFromEnv();
   const runs = await listWorkflowRuns(client, { owner, repo, limit: options.limit, workflow: options.workflow });
-  const flakyStats = await detectFlakyJobs(client, { owner, repo, runs });
-  const wastedJobs = flakyStats.map((stat2, index) => ({
+  const confirmedStats = await detectFlakyJobs(client, { owner, repo, runs });
+  const likelyStats = await detectLikelyFlakyJobs(client, {
+    owner,
+    repo,
+    runs,
+    retryWindowMinutes: options.retryWindowMinutes
+  });
+  const taggedStats = [
+    ...confirmedStats.map((stat2) => ({ stat: stat2, confidence: "confirmed" })),
+    ...likelyStats.map((stat2) => ({ stat: stat2, confidence: "likely" }))
+  ];
+  const wastedJobs = taggedStats.map(({ stat: stat2, confidence }, index) => ({
     jobId: index + 1,
     jobName: stat2.jobName,
     runnerOs: stat2.runnerOs,
-    wastedMinutes: stat2.wastedMinutes
+    wastedMinutes: stat2.wastedMinutes,
+    confidence
   }));
   const dateRange = computeDateRange(runs);
   const costReport = buildCostReport({ wastedJobs, dateRange, priceOverrides: options.priceOverrides });
-  const jobs = flakyStats.map((stat2, index) => {
+  const jobs = taggedStats.map(({ stat: stat2, confidence }, index) => {
     const cost = costReport.jobs[index];
     return {
       jobName: stat2.jobName,
       runnerOs: stat2.runnerOs,
+      confidence,
       flakyRuns: stat2.flakyRuns,
       sampleSize: stat2.sampleSize,
       flakinessRate: stat2.flakinessRate,
@@ -23761,8 +23862,17 @@ async function runScan(options, deps = {}) {
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     runsAnalyzed: runs.length,
     dateRange: { from: dateRange.from.toISOString(), to: dateRange.to.toISOString() },
+    retryWindowMinutes: options.retryWindowMinutes,
     jobs,
-    totalWastedMinutes: Math.round(jobs.reduce((sum, job) => sum + job.wastedMinutes, 0) * 100) / 100,
+    confirmed: {
+      wastedMinutes: sumWastedMinutes(jobs.filter((job) => job.confidence === "confirmed")),
+      costUsd: costReport.confirmedCostUsd
+    },
+    likely: {
+      wastedMinutes: sumWastedMinutes(jobs.filter((job) => job.confidence === "likely")),
+      costUsd: costReport.likelyCostUsd
+    },
+    totalWastedMinutes: sumWastedMinutes(jobs),
     totalCostUsd: costReport.totalCostUsd,
     analyzedDays: costReport.projection.analyzedDays,
     projectedMonthlyCostUsd: costReport.projection.projectedMonthlyCostUsd
@@ -23790,6 +23900,15 @@ function padLeft(value, width) {
   return value.length >= width ? value : " ".repeat(width - value.length) + value;
 }
 var TABLE_HEADERS = ["Job", "Runs", "Flaky", "Rate", "Wasted min", "USD"];
+var CONFIRMED_LABEL = "Confirmed flaky";
+var LIKELY_LABEL = "Likely flaky";
+var CONFIRMED_EVIDENCE = "same commit, retried and passed";
+function likelyEvidence(retryWindowMinutes) {
+  return `push-to-retry pattern within ${retryWindowMinutes} min`;
+}
+function jobsByConfidence(report, confidence) {
+  return report.jobs.filter((job) => job.confidence === confidence);
+}
 function jobToTableRow(job) {
   return [
     job.jobName,
@@ -23800,11 +23919,28 @@ function jobToTableRow(job) {
     formatUsd(job.costUsd)
   ];
 }
-function renderTable(report) {
-  const rows = report.jobs.map(jobToTableRow);
-  const allRows = [TABLE_HEADERS, ...rows];
+function renderTableSection(title, evidence, rows, total) {
+  const lines = [];
+  lines.push(`${title} (evidence: ${evidence})`);
+  const tableRows = rows.map(jobToTableRow);
+  const allRows = [TABLE_HEADERS, ...tableRows];
   const widths = TABLE_HEADERS.map((_, col) => Math.max(...allRows.map((row) => row[col]?.length ?? 0)));
   const formatRow = (row) => row.map((cell, col) => col === 0 ? padRight(cell, widths[col]) : padLeft(cell, widths[col])).join("  ");
+  lines.push(formatRow(TABLE_HEADERS));
+  lines.push(widths.map((width) => "-".repeat(width)).join("  "));
+  if (tableRows.length === 0) {
+    lines.push("(none detected)");
+  } else {
+    for (const row of tableRows) {
+      lines.push(formatRow(row));
+    }
+  }
+  lines.push(`${title} total: ${formatMinutes(total.wastedMinutes)} min \u2014 ${formatUsd(total.costUsd)}`);
+  return lines;
+}
+function renderTable(report) {
+  const confirmedRows = jobsByConfidence(report, "confirmed");
+  const likelyRows = jobsByConfidence(report, "likely");
   const lines = [];
   lines.push(`Veedor CI report for ${report.repo}${report.workflow ? ` (workflow: ${report.workflow})` : ""}`);
   lines.push(
@@ -23812,42 +23948,31 @@ function renderTable(report) {
       report.dateRange.to
     )}, ${report.analyzedDays.toFixed(1)} days)`
   );
+  lines.push(`Retry window for "likely flaky": ${report.retryWindowMinutes} min`);
   lines.push("");
-  lines.push(formatRow(TABLE_HEADERS));
-  lines.push(widths.map((width) => "-".repeat(width)).join("  "));
-  if (rows.length === 0) {
-    lines.push("(no flaky jobs detected)");
-  } else {
-    for (const row of rows) {
-      lines.push(formatRow(row));
-    }
-  }
+  lines.push(...renderTableSection(CONFIRMED_LABEL, CONFIRMED_EVIDENCE, confirmedRows, report.confirmed));
   lines.push("");
-  lines.push(`Total wasted: ${formatMinutes(report.totalWastedMinutes)} min \u2014 ${formatUsd(report.totalCostUsd)}`);
+  lines.push(...renderTableSection(LIKELY_LABEL, likelyEvidence(report.retryWindowMinutes), likelyRows, report.likely));
+  lines.push("");
+  lines.push(`Combined total wasted: ${formatMinutes(report.totalWastedMinutes)} min \u2014 ${formatUsd(report.totalCostUsd)}`);
   lines.push(`Projected monthly cost: ${formatUsd(report.projectedMonthlyCostUsd)}`);
   return lines.join("\n");
 }
 function renderJson(report) {
   return JSON.stringify(report, null, 2);
 }
-function renderMarkdown(report) {
-  const top = report.jobs.slice(0, TOP_MARKDOWN_JOBS);
+function renderMarkdownSection(title, evidence, rows, total) {
+  const top = rows.slice(0, TOP_MARKDOWN_JOBS);
   const lines = [];
-  lines.push(`## Veedor CI report \u2014 ${report.repo}`);
+  lines.push(`### ${title}`);
   lines.push("");
   lines.push(
-    `**Total wasted spend: ${formatUsd(report.totalCostUsd)}** across ${report.runsAnalyzed} runs analyzed (${formatDate(report.dateRange.from)} to ${formatDate(report.dateRange.to)}, ~${report.analyzedDays.toFixed(
-      1
-    )} days) \u2014 projected **${formatUsd(report.projectedMonthlyCostUsd)}/month** if this trend holds.`
+    `_Evidence: ${evidence}._ Total: **${formatUsd(total.costUsd)}** (${formatMinutes(total.wastedMinutes)} min).`
   );
   lines.push("");
   if (top.length === 0) {
-    lines.push("### Flakiest jobs");
-    lines.push("");
-    lines.push("No flaky jobs detected in this range.");
+    lines.push("No jobs detected in this category.");
   } else {
-    lines.push(`### Top ${top.length} flakiest jobs`);
-    lines.push("");
     lines.push("| Job | Runs | Flaky | Rate | Wasted min | USD |");
     lines.push("| --- | ---: | ---: | ---: | ---: | ---: |");
     for (const job of top) {
@@ -23857,7 +23982,36 @@ function renderMarkdown(report) {
         )} | ${formatUsd(job.costUsd)} |`
       );
     }
+    if (rows.length > top.length) {
+      lines.push("");
+      lines.push(`_...and ${rows.length - top.length} more._`);
+    }
   }
+  return lines;
+}
+function renderMarkdown(report) {
+  const confirmedRows = jobsByConfidence(report, "confirmed");
+  const likelyRows = jobsByConfidence(report, "likely");
+  const lines = [];
+  lines.push(`## Veedor CI report \u2014 ${report.repo}`);
+  lines.push("");
+  lines.push(
+    `**Total wasted spend: ${formatUsd(report.totalCostUsd)}** across ${report.runsAnalyzed} runs analyzed (${formatDate(report.dateRange.from)} to ${formatDate(report.dateRange.to)}, ~${report.analyzedDays.toFixed(
+      1
+    )} days) \u2014 projected **${formatUsd(report.projectedMonthlyCostUsd)}/month** if this trend holds.`
+  );
+  lines.push("");
+  lines.push(
+    `> **Confidence levels:** _Confirmed_ = the same commit was retried and passed \u2014 hard evidence. _Likely_ = a failure was followed by a pass on the *next* commit pushed to the same branch within ${report.retryWindowMinutes} min (push-to-retry) \u2014 a strong signal, but not proof: the "fix" could also have been a real code change rather than a flake.`
+  );
+  lines.push("");
+  lines.push(...renderMarkdownSection(CONFIRMED_LABEL, CONFIRMED_EVIDENCE, confirmedRows, report.confirmed));
+  lines.push("");
+  lines.push(...renderMarkdownSection(LIKELY_LABEL, likelyEvidence(report.retryWindowMinutes), likelyRows, report.likely));
+  lines.push("");
+  lines.push(
+    `**Combined: ${formatUsd(report.totalCostUsd)}** (${formatMinutes(report.totalWastedMinutes)} min) across both categories.`
+  );
   lines.push("");
   lines.push(`<sub>Generated by veedor-ci on ${formatDate(report.generatedAt)}.</sub>`);
   return lines.join("\n");
@@ -23932,6 +24086,9 @@ function splitRepo2(repo) {
   }
   return { owner, repo: name };
 }
+function resolveGitHubToken(inputToken, envToken) {
+  return inputToken || envToken || void 0;
+}
 async function run() {
   const repo = process.env.GITHUB_REPOSITORY;
   if (!repo) {
@@ -23941,9 +24098,11 @@ async function run() {
     repo,
     workflow: getInput("workflow") || void 0,
     limit: getInput("limit") || "200",
-    format: getInput("format") || "table"
+    format: getInput("format") || "table",
+    retryWindow: getInput("retry-window") || void 0
   });
-  const client = createOctokitFromEnv();
+  const token = resolveGitHubToken(getInput("github-token"), process.env.GITHUB_TOKEN);
+  const client = createOctokitFromEnv({ token });
   const report = await runScan(options, { client });
   info(renderReport(report, options.format));
   const commentOnPr = getBooleanInput("comment-on-pr");

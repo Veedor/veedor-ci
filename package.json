@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build": "tsc && npm run build:action",
-    "build:action": "esbuild src/action-entry.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/action/index.cjs",
+    "build:action": "esbuild src/action-entry.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/action/index.cjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
