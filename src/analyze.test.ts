@@ -324,6 +324,70 @@ describe('detectLikelyFlakyJobs', () => {
     expect(result.excludedRunsMissingBranch).toBe(0);
   });
 
+  it('collapses same-SHA push+pull_request runs before pairing, so a same-commit fail-then-pass does not mask the real pair on the next commit', async () => {
+    // sha-A: one commit, two triggers (push then pull_request) firing 2s
+    // apart, disagreeing — push fails, pull_request passes. This is the
+    // exact shape seen in production: the developer's PR check went green,
+    // so this commit must never surface as a failure.
+    // sha-B -> sha-C: a genuine push-to-retry pair on distinct commits,
+    // shortly after. This is the pair that must still be detected even
+    // though sha-A's collapsed success sits immediately before it.
+    const runs = [
+      makePushRun({ id: 1, sha: 'sha-A', conclusion: 'failure', createdAt: '2026-08-01T00:00:00Z' }),
+      makePushRun({ id: 2, sha: 'sha-A', conclusion: 'success', createdAt: '2026-08-01T00:00:02Z' }),
+      makePushRun({ id: 3, sha: 'sha-B', conclusion: 'failure', createdAt: '2026-08-01T00:10:00Z' }),
+      makePushRun({ id: 4, sha: 'sha-C', conclusion: 'success', createdAt: '2026-08-01T00:12:00Z' }),
+    ];
+    const client = clientWithLatestJobByRun({
+      1: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'failure',
+        started_at: '2026-08-01T00:00:00Z',
+        completed_at: '2026-08-01T00:09:00Z', // 9 wasted minutes that must NOT leak into the total
+      }),
+      2: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'success',
+        started_at: '2026-08-01T00:00:02Z',
+        completed_at: '2026-08-01T00:01:02Z',
+      }),
+      3: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'failure',
+        started_at: '2026-08-01T00:10:00Z',
+        completed_at: '2026-08-01T00:15:00Z', // 5 wasted minutes that MUST be counted
+      }),
+      4: makeJob({
+        name: 'unit-tests',
+        run_attempt: 1,
+        conclusion: 'success',
+        started_at: '2026-08-01T00:12:00Z',
+        completed_at: '2026-08-01T00:13:00Z',
+      }),
+    });
+
+    const result = await detectLikelyFlakyJobs(client, {
+      owner: 'octocat',
+      repo: 'hello-world',
+      runs,
+      retryWindowMinutes: 60,
+    });
+
+    expect(result.stats).toEqual([
+      {
+        jobName: 'unit-tests',
+        runnerOs: 'linux',
+        flakyRuns: 1,
+        sampleSize: 3, // sha-A's two runs collapsed into one
+        flakinessRate: 0.3333,
+        wastedMinutes: 5, // only sha-B's failed attempt; sha-A's 9 wasted minutes never surfaced
+      },
+    ]);
+  });
+
   it('does not count a fail-then-pass pair when the pass falls outside the retry window', async () => {
     const runs = [
       makePushRun({ id: 1, sha: 'sha-A', conclusion: 'failure', createdAt: '2026-08-01T00:00:00Z' }),

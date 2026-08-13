@@ -127,6 +127,29 @@ function groupKey(entry: Pick<JobTimelineEntry, 'workflowName' | 'jobName' | 'br
   return JSON.stringify([entry.workflowName, entry.jobName, entry.branch]);
 }
 
+/**
+ * Collapses consecutive same-SHA entries in an already time-sorted timeline
+ * into one, keeping the most recent run's conclusion — the "final" state a
+ * developer actually saw for that commit. A single commit can produce
+ * multiple job runs (e.g. a `push` and a `pull_request` trigger firing
+ * moments apart) that disagree with each other; without collapsing, a
+ * same-SHA success sitting right after a same-SHA failure occupies the
+ * adjacency slot the pairing loop below relies on, hiding a real
+ * push-to-retry pattern against the *next distinct* commit.
+ */
+function collapseSameShaRuns(sortedEntries: JobTimelineEntry[]): JobTimelineEntry[] {
+  const collapsed: JobTimelineEntry[] = [];
+  for (const entry of sortedEntries) {
+    const last = collapsed.at(-1);
+    if (last && last.headSha === entry.headSha) {
+      collapsed[collapsed.length - 1] = entry;
+    } else {
+      collapsed.push(entry);
+    }
+  }
+  return collapsed;
+}
+
 export interface DetectLikelyFlakyJobsParams {
   owner: string;
   repo: string;
@@ -161,6 +184,14 @@ export interface DetectLikelyFlakyJobsParams {
  * next result for that job — this is what keeps the "no jumping over other
  * runs in between" rule (and prevents one failure from being double-counted
  * against two different later successes).
+ *
+ * Before pairing, consecutive same-SHA entries are collapsed into one (see
+ * collapseSameShaRuns), keeping the most recent run's conclusion. A single
+ * commit can trigger more than one run of the same job (e.g. `push` and
+ * `pull_request` firing moments apart) that disagree; left uncollapsed, a
+ * same-SHA success landing right after a same-SHA failure would occupy the
+ * one adjacency slot available and mask a genuine failure on the *next*
+ * distinct commit.
  */
 export async function detectLikelyFlakyJobs(
   client: GitHubClient,
@@ -209,18 +240,19 @@ export async function detectLikelyFlakyJobs(
 
   for (const group of groups.values()) {
     group.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const collapsed = collapseSameShaRuns(group);
 
-    const jobName = group[0]!.jobName;
+    const jobName = collapsed[0]!.jobName;
     let accumulator = accumulators.get(jobName);
     if (!accumulator) {
-      accumulator = { runnerOs: group[0]!.runnerOs, flakyRuns: 0, sampleSize: 0, wastedMinutes: 0 };
+      accumulator = { runnerOs: collapsed[0]!.runnerOs, flakyRuns: 0, sampleSize: 0, wastedMinutes: 0 };
       accumulators.set(jobName, accumulator);
     }
-    accumulator.sampleSize += group.length;
+    accumulator.sampleSize += collapsed.length;
 
-    for (let i = 1; i < group.length; i += 1) {
-      const prev = group[i - 1]!;
-      const curr = group[i]!;
+    for (let i = 1; i < collapsed.length; i += 1) {
+      const prev = collapsed[i - 1]!;
+      const curr = collapsed[i]!;
       if (prev.conclusion !== 'failure' || curr.conclusion !== 'success' || prev.headSha === curr.headSha) {
         continue;
       }

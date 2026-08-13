@@ -23576,6 +23576,18 @@ var MAX_RETRY_WINDOW_MINUTES = 240;
 function groupKey(entry) {
   return JSON.stringify([entry.workflowName, entry.jobName, entry.branch]);
 }
+function collapseSameShaRuns(sortedEntries) {
+  const collapsed = [];
+  for (const entry of sortedEntries) {
+    const last = collapsed.at(-1);
+    if (last && last.headSha === entry.headSha) {
+      collapsed[collapsed.length - 1] = entry;
+    } else {
+      collapsed.push(entry);
+    }
+  }
+  return collapsed;
+}
 async function detectLikelyFlakyJobs(client, params) {
   const { owner, repo, runs, retryWindowMinutes } = params;
   const runsWithConclusion = runs.filter((run2) => run2.conclusion === "success" || run2.conclusion === "failure");
@@ -23615,16 +23627,17 @@ async function detectLikelyFlakyJobs(client, params) {
   const accumulators = /* @__PURE__ */ new Map();
   for (const group of groups.values()) {
     group.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-    const jobName = group[0].jobName;
+    const collapsed = collapseSameShaRuns(group);
+    const jobName = collapsed[0].jobName;
     let accumulator = accumulators.get(jobName);
     if (!accumulator) {
-      accumulator = { runnerOs: group[0].runnerOs, flakyRuns: 0, sampleSize: 0, wastedMinutes: 0 };
+      accumulator = { runnerOs: collapsed[0].runnerOs, flakyRuns: 0, sampleSize: 0, wastedMinutes: 0 };
       accumulators.set(jobName, accumulator);
     }
-    accumulator.sampleSize += group.length;
-    for (let i = 1; i < group.length; i += 1) {
-      const prev = group[i - 1];
-      const curr = group[i];
+    accumulator.sampleSize += collapsed.length;
+    for (let i = 1; i < collapsed.length; i += 1) {
+      const prev = collapsed[i - 1];
+      const curr = collapsed[i];
       if (prev.conclusion !== "failure" || curr.conclusion !== "success" || prev.headSha === curr.headSha) {
         continue;
       }
